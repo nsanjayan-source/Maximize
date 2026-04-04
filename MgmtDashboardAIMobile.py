@@ -22,8 +22,28 @@ conn = sqlite3.connect("school.db", check_same_thread=False)
 
 # ---------------- LOAD DATA ----------------
 def load_data():
-    return pd.read_sql("SELECT * FROM marks", conn)
+    try:
+        return pd.read_sql("SELECT * FROM marks", conn)
+    except:
+        # Create empty table if not exists
+        df = pd.DataFrame(columns=["class", "student", "subject", "exam", "marks"])
+        df.to_sql("marks", conn, index=False, if_exists="replace")
+        return df
 
+def init_db():
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS marks (
+            class TEXT,
+            student TEXT,
+            subject TEXT,
+            exam TEXT,
+            marks INTEGER
+        )
+    """)
+    conn.commit()
+
+init_db()
 
 df = load_data()
 
