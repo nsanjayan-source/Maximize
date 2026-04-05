@@ -180,7 +180,7 @@ if st.session_state.level == "school":
                         text_auto=True
                     )
                     fig_sub.update_traces(textposition="outside")
-                    st.plotly_chart(fig_sub, use_container_width=True)
+                    st.plotly_chart(fig_sub, use_container_width=True, key=f"{fig_sub}_{exam}_{i}")
 
                 # ---------------- TAB 3: CLASS AVG ----------------
                 with tab3:
@@ -194,7 +194,7 @@ if st.session_state.level == "school":
                         text_auto=True
                     )
                     fig_cls.update_traces(textposition="outside")
-                    st.plotly_chart(fig_cls, use_container_width=True)
+                    st.plotly_chart(fig_cls, use_container_width=True, key=f"{fig_cls}_{exam}_{i}")
 
                 # ---------------- TAB 4: ATTENDANCE ----------------
                 with tab4:
@@ -208,14 +208,14 @@ if st.session_state.level == "school":
                         text_auto=True
                     )
                     fig_att.update_traces(textposition="outside")
-                    st.plotly_chart(fig_att, use_container_width=True)
+                    st.plotly_chart(fig_att, use_container_width=True, key=f"{fig_att}_{exam}_{i}")
 
         if st.button("Drill to Class"):
             st.session_state.level = "class"
             st.rerun()
 
-# ---------------- CLASS VIEW ----------------
-elif st.session_state.level == "class":
+# ---------------- CLASS VIEW (NEW - TABS + MOBILE FRIENDLY) ----------------
+if st.session_state.level == "class":
     st.title("🏫 Class Dashboard")
 
     if df.empty:
@@ -262,7 +262,7 @@ elif st.session_state.level == "class":
                             text_auto=True
                         )
                         fig_sub.update_traces(textposition="outside")
-                        st.plotly_chart(fig_sub, use_container_width=True)
+                        st.plotly_chart(fig_sub, use_container_width=True, key=f"{fig_sub}_{exam}_{i}")
 
                     # -------- TAB 3: STUDENT AVG --------
                     with tab3:
@@ -276,7 +276,7 @@ elif st.session_state.level == "class":
                             text_auto=True
                         )
                         fig_stu.update_traces(textposition="outside")
-                        st.plotly_chart(fig_stu, use_container_width=True)
+                        st.plotly_chart(fig_stu, use_container_width=True, key=f"{fig_stu}_{exam}_{i}")
 
                     # -------- TAB 4: ATTENDANCE --------
                     with tab4:
@@ -294,7 +294,7 @@ elif st.session_state.level == "class":
                             text_auto=True
                         )
                         fig_att.update_traces(textposition="outside")
-                        st.plotly_chart(fig_att, use_container_width=True)
+                        st.plotly_chart(fig_att, use_container_width=True, key=f"{fig_att}_{exam}_{i}")
 
         # Navigation back
         if st.button("⬅ Back to School"):
@@ -305,13 +305,13 @@ elif st.session_state.level == "class":
             st.session_state.level = "student"
             st.rerun()
 
-# ---------------- STUDENT VIEW ----------------
-elif st.session_state.level == "student":
-   st.title("🎓 Student Dashboard")
+# ---------------- STUDENT VIEW (NEW - TABS + MOBILE FRIENDLY) ----------------
+if st.session_state.level == "student":
+    st.title("🎓 Student Dashboard")
 
-   if df.empty:
+    if df.empty:
         st.warning("No data available. Admin upload required.")
-   else:
+    else:
         # Select Class first (to scope students)
         classes = sorted(df["class"].unique())
         selected_class = st.selectbox("Select Class", classes, key="stu_class")
@@ -359,7 +359,7 @@ elif st.session_state.level == "student":
                             text_auto=True
                         )
                         fig_sub.update_traces(textposition="outside")
-                        st.plotly_chart(fig_sub, use_container_width=True)
+                        st.plotly_chart(fig_sub, use_container_width=True, key=f"{fig_sub}_{exam}_{i}")
 
                     # -------- TAB 3: RANK DISTRIBUTION --------
                     with tab3:
@@ -380,7 +380,7 @@ elif st.session_state.level == "student":
                             text_auto=True
                         )
                         fig_rank.update_traces(textposition="outside")
-                        st.plotly_chart(fig_rank, use_container_width=True)
+                        st.plotly_chart(fig_rank, use_container_width=True, key=f"{fig_rank}_{exam}_{i}")
 
                     # -------- TAB 4: ATTENDANCE --------
                     with tab4:
@@ -398,7 +398,7 @@ elif st.session_state.level == "student":
                             text_auto=True
                         )
                         fig_att.update_traces(textposition="outside")
-                        st.plotly_chart(fig_att, use_container_width=True)
+                        st.plotly_chart(fig_att, use_container_width=True, key=f"{fig_att}_{exam}_{i}")
 
         # Navigation back
         if st.button("⬅ Back to Class"):
