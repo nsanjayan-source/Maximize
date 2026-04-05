@@ -391,7 +391,7 @@ if st.session_state.level == "student":
                             "student": [selected_student],
                             "attendance": [att_value]
                         })
-			fig_att = px.pie(
+                        fig_att = px.pie(
                             att_df,
                             names="type",
                             values="value",
