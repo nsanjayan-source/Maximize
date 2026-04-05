@@ -301,6 +301,10 @@ elif st.session_state.level == "class":
             st.session_state.level = "school"
             st.rerun()
 
+        if st.button("Drill to Student"):
+            st.session_state.level = "student"
+            st.rerun()
+
 # ---------------- STUDENT VIEW ----------------
 elif st.session_state.level == "student":
    st.title("🎓 Student Dashboard")
