@@ -305,9 +305,9 @@ elif st.session_state.level == "class":
 elif st.session_state.level == "student":
    st.title("🎓 Student Dashboard")
 
-    if df.empty:
+   if df.empty:
         st.warning("No data available. Admin upload required.")
-    else:
+   else:
         # Select Class first (to scope students)
         classes = sorted(df["class"].unique())
         selected_class = st.selectbox("Select Class", classes, key="stu_class")
