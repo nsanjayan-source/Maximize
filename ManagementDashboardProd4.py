@@ -387,10 +387,15 @@ if st.session_state.level == "student":
                     with tab4:
                         st.subheader("Attendance (%)")
                         att_value = int(np.random.randint(75, 100))
+
                         att_df = pd.DataFrame({
-                            "student": [selected_student],
-                            "attendance": [att_value]
+                            "type": ["Present", "Absent"],
+                            "value": [att_value, 100 - att_value]
                         })
+
+                        # Ensure valid data
+                        att_df["value"] = att_df["value"].astype(int)
+
                         fig_att = px.pie(
                             att_df,
                             names="type",
@@ -398,8 +403,10 @@ if st.session_state.level == "student":
                             hole=0.4
                         )
 
-                        fig_att.update_traces(textposition="outside")
-                        st.plotly_chart(fig_att, use_container_width=True, key=f"{fig_att}_{exam}_{i}")
+                        # Add labels for clarity
+                        fig_att.update_traces(textinfo='percent+label')
+
+                        st.plotly_chart(fig_att, use_container_width=True, key=f"att_{exam}_{i}")
 
         # Navigation back
         if st.button("⬅ Back to Class"):
