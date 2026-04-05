@@ -391,11 +391,9 @@ if st.session_state.level == "student":
                             "student": [selected_student],
                             "attendance": [att_value]
                         })
-                        fig_att = px.bar(
+                        fig_att = px.pie(
                             att_df,
                             x="attendance",
-                            y="student",
-                            orientation='h',
                             text_auto=True
                         )
                         fig_att.update_traces(textposition="outside")
