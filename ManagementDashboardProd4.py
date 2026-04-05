@@ -361,26 +361,27 @@ if st.session_state.level == "student":
                         fig_sub.update_traces(textposition="outside")
                         st.plotly_chart(fig_sub, use_container_width=True, key=f"{fig_sub}_{exam}_{i}")
 
-                    # -------- TAB 3: RANK DISTRIBUTION --------
+                    # -------- TAB 3: SUBJECT-WISE RANK --------
                     with tab3:
-                        st.subheader("Rank within Class")
-                        # Calculate total marks per student for this exam in the class
+                        st.subheader("Subject-wise Rank within Class")
                         class_exam_df = sdf[sdf["exam"] == exam]
-                        totals = class_exam_df.groupby("student")["marks"].sum().reset_index()
-                        totals["rank"] = totals["marks"].rank(ascending=False, method="min")
 
-                        # Get selected student's rank
-                        stu_rank_df = totals[totals["student"] == selected_student]
+                        # Rank within each subject
+                        class_exam_df["rank"] = class_exam_df.groupby("subject")["marks"] \
+                            .rank(ascending=False, method="min")
+
+                        # Filter selected student
+                        stu_rank_df = class_exam_df[class_exam_df["student"] == selected_student]
 
                         fig_rank = px.bar(
                             stu_rank_df,
                             x="rank",
-                            y="student",
+                            y="subject",
                             orientation='h',
                             text_auto=True
                         )
                         fig_rank.update_traces(textposition="outside")
-                        st.plotly_chart(fig_rank, use_container_width=True, key=f"{fig_rank}_{exam}_{i}")
+                        st.plotly_chart(fig_rank, use_container_width=True, key=f"rank_{exam}_{i}")
 
                     # -------- TAB 4: ATTENDANCE --------
                     with tab4:
@@ -403,6 +404,10 @@ if st.session_state.level == "student":
         # Navigation back
         if st.button("⬅ Back to Class"):
             st.session_state.level = "class"
+            st.rerun()
+
+        if st.button("⬅ Back to School"):
+            st.session_state.level = "school"
             st.rerun()
 
 
