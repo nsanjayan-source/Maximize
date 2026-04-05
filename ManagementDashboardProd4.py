@@ -391,11 +391,13 @@ if st.session_state.level == "student":
                             "student": [selected_student],
                             "attendance": [att_value]
                         })
-                        fig_att = px.pie(
+			fig_att = px.pie(
                             att_df,
-                            x="attendance",
-                            text_auto=True
+                            names="type",
+                            values="value",
+                            hole=0.4
                         )
+
                         fig_att.update_traces(textposition="outside")
                         st.plotly_chart(fig_att, use_container_width=True, key=f"{fig_att}_{exam}_{i}")
 
