@@ -385,11 +385,15 @@ if st.session_state.level == "student":
                         )
 
                         fig_rank.update_traces(textposition="outside")
-                        fig_rank.update_layout(xaxis_title="Rank (Higher is Better)")
+                        #fig_rank.update_layout(xaxis_title="Rank (Higher is Better)")
+                        
+                        # Hide X-axis to avoid confusion
+                        fig_rank.update_layout(xaxis=dict(showticklabels=False, visible=False), xaxis_title=None)
+
 
                         st.plotly_chart(fig_rank, use_container_width=True, key=f"rank_{exam}_{i}")
 
-                    # -------- TAB 4: ATTENDANCE --------
+                    # -------- TAB 4: ATTENDANCE --------   
                     with tab4:
                         st.subheader("Attendance (%)")
                         att_value = int(np.random.randint(75, 100))
