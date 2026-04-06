@@ -384,10 +384,10 @@ if st.session_state.level == "student":
                             text="rank"  # still show actual rank
                         )
 
-fig_rank.update_traces(textposition="outside")
-fig_rank.update_layout(xaxis_title="Rank (Higher is Better)")
+                        fig_rank.update_traces(textposition="outside")
+                        fig_rank.update_layout(xaxis_title="Rank (Higher is Better)")
 
-st.plotly_chart(fig_rank, use_container_width=True, key=f"rank_{exam}_{i}")
+                        st.plotly_chart(fig_rank, use_container_width=True, key=f"rank_{exam}_{i}")
 
                     # -------- TAB 4: ATTENDANCE --------
                     with tab4:
