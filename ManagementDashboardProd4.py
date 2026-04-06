@@ -373,15 +373,21 @@ if st.session_state.level == "student":
                         # Filter selected student
                         stu_rank_df = class_exam_df[class_exam_df["student"] == selected_student]
 
+                        # Convert rank so that Rank 1 becomes highest value
+                        stu_rank_df["rank_score"] = stu_rank_df["rank"].max() - stu_rank_df["rank"] + 1
+
                         fig_rank = px.bar(
                             stu_rank_df,
-                            x="rank",
+                            x="rank_score",
                             y="subject",
                             orientation='h',
-                            text_auto=True
+                            text="rank"  # still show actual rank
                         )
-                        fig_rank.update_traces(textposition="outside")
-                        st.plotly_chart(fig_rank, use_container_width=True, key=f"rank_{exam}_{i}")
+
+fig_rank.update_traces(textposition="outside")
+fig_rank.update_layout(xaxis_title="Rank (Higher is Better)")
+
+st.plotly_chart(fig_rank, use_container_width=True, key=f"rank_{exam}_{i}")
 
                     # -------- TAB 4: ATTENDANCE --------
                     with tab4:
