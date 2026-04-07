@@ -327,7 +327,10 @@ if st.session_state.level == "student":
         classes = sorted(df["class"].unique())
         selected_class = st.selectbox("Select Class", classes)
 
-        sections = sorted(df[df["class"] == selected_class]["section"].unique())
+        sections = sorted(
+            df[df["class"] == selected_class]["section"].dropna().unique()
+        )
+
         selected_section = st.selectbox("Select Section", sections)
 
         students = sorted(
@@ -386,7 +389,12 @@ if st.session_state.level == "student":
                     # -------- TAB 3: SUBJECT-WISE RANK --------
                     with tab3:
                         st.subheader("Subject-wise Rank within Class")
-                        class_exam_df = sdf[sdf["exam"] == exam]
+                        
+                        class_exam_df = df[
+                            (df["class"] == selected_class) &
+                            (df["section"] == selected_section) &
+                            (df["exam"] == exam)
+                        ].copy()
 
                         # Rank within each subject
                         class_exam_df["rank"] = class_exam_df.groupby("subject")["marks"] \
