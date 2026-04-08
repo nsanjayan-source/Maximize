@@ -196,16 +196,35 @@ if st.session_state.level == "school":
                 # ---------------- TAB 3: CLASS AVG ----------------
                 with tab3:
                     st.subheader("Class-wise Average Marks")
-                    class_avg = get_class_avg(edf)
+                    class_sec_avg = get_class_section_avg(edf).copy()
+                    class_sec_avg["class_section"] = (
+                        class_sec_avg["class"].astype(str).str.strip()
+                        + class_sec_avg["section"].astype(str).str.strip()
+                    )
+
+                    # Sort like 8A, 8B, 9A... even if class is stored as text
+                    class_sec_avg["_class_num"] = pd.to_numeric(class_sec_avg["class"], errors="coerce")
+                    class_sec_avg = class_sec_avg.sort_values(
+                        by=["_class_num", "class", "section"],
+                        ascending=[True, True, True],
+                        kind="stable",
+                    )
+
                     fig_cls = px.bar(
-                        class_avg,
+                        class_sec_avg,
                         x="marks",
-                        y="class",
+                        y="class_section",
                         orientation='h',
                         text_auto=True
                     )
                     fig_cls.update_traces(textposition="outside", texttemplate="%{x:.0f}%")
                     fig_cls.update_xaxes(tickformat=".0f", ticksuffix="%")
+                    fig_cls.update_yaxes(
+                        type="category",
+                        categoryorder="array",
+                        categoryarray=class_sec_avg["class_section"].tolist(),
+                        title_text="Class-Section",
+                    )
                     st.plotly_chart(fig_cls, use_container_width=True, key=f"{fig_cls}_{exam}_{i}")
 
                 # ---------------- TAB 4: ATTENDANCE ----------------
