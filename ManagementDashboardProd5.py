@@ -234,7 +234,10 @@ if st.session_state.level == "school":
                         x="marks",
                         y="class_section",
                         orientation='h',
-                        text_auto=True
+                        text_auto=True,
+                        color="marks",
+                        color_continuous_scale="RdYlGn",
+                        range_color=(0, 100),
                     )
                     fig_cls.update_traces(textposition="outside", texttemplate="%{x:.0f}%")
                     fig_cls.update_xaxes(tickformat=".0f", ticksuffix="%")
@@ -244,6 +247,7 @@ if st.session_state.level == "school":
                         categoryarray=class_sec_avg["class_section"].tolist(),
                         title_text="Class-Section",
                     )
+                    fig_cls.update_layout(coloraxis_colorbar=dict(title="Avg %"))
                     st.plotly_chart(fig_cls, use_container_width=True, key=f"{fig_cls}_{exam}_{i}")
 
                 # ---------------- TAB 4: ATTENDANCE ----------------
