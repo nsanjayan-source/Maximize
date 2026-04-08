@@ -285,13 +285,17 @@ if st.session_state.level == "class":
         classes = sorted(df["class"].unique())
         selected_class = st.selectbox("Select Class", classes)
 
-        sections = sorted(df[df["class"] == selected_class]["section"].unique())
-        selected_section = st.selectbox("Select Section", sections)
+        sections = sorted(df[df["class"] == selected_class]["section"].dropna().unique())
+        section_options = ["All Sections"] + sections
+        selected_section = st.selectbox("Select Section", section_options, index=0)
 
-        cdf = df[
-            (df["class"] == selected_class) &
-            (df["section"] == selected_section)
-        ]
+        if selected_section == "All Sections":
+            cdf = df[df["class"] == selected_class]
+        else:
+            cdf = df[
+                (df["class"] == selected_class) &
+                (df["section"] == selected_section)
+            ]
 
         if cdf.empty:
             st.warning("No data available for selected class")
