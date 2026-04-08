@@ -67,14 +67,20 @@ init_db()
 
 # ---------------- HELPER CALCULATIONS ----------------
 def get_class_avg(df_exam):
-    return df_exam.groupby("class")["marks"].mean().reset_index()
+    out = df_exam.groupby("class")["marks"].mean().reset_index()
+    out["marks"] = out["marks"].round(0)
+    return out
 
 def get_class_section_avg(df_exam):
-    return df_exam.groupby(["class", "section"])["marks"].mean().reset_index()
+    out = df_exam.groupby(["class", "section"])["marks"].mean().reset_index()
+    out["marks"] = out["marks"].round(0)
+    return out
 
 
 def get_subject_avg(df_exam):
-    return df_exam.groupby("subject")["marks"].mean().reset_index()
+    out = df_exam.groupby("subject")["marks"].mean().reset_index()
+    out["marks"] = out["marks"].round(0)
+    return out
 
 
 def get_attendance(df_exam):
@@ -183,7 +189,8 @@ if st.session_state.level == "school":
                         y="marks",
                         text_auto=True
                     )
-                    fig_sub.update_traces(textposition="outside")
+                    fig_sub.update_traces(textposition="outside", texttemplate="%{y:.0f}%")
+                    fig_sub.update_yaxes(tickformat=".0f", ticksuffix="%")
                     st.plotly_chart(fig_sub, use_container_width=True, key=f"{fig_sub}_{exam}_{i}")
 
                 # ---------------- TAB 3: CLASS AVG ----------------
@@ -197,7 +204,8 @@ if st.session_state.level == "school":
                         orientation='h',
                         text_auto=True
                     )
-                    fig_cls.update_traces(textposition="outside")
+                    fig_cls.update_traces(textposition="outside", texttemplate="%{x:.0f}%")
+                    fig_cls.update_xaxes(tickformat=".0f", ticksuffix="%")
                     st.plotly_chart(fig_cls, use_container_width=True, key=f"{fig_cls}_{exam}_{i}")
 
                 # ---------------- TAB 4: ATTENDANCE ----------------
@@ -266,19 +274,22 @@ if st.session_state.level == "class":
                     with tab2:
                         st.subheader("Subject-wise Average Marks")
                         subj_avg = edf.groupby("subject")["marks"].mean().reset_index()
+                        subj_avg["marks"] = subj_avg["marks"].round(0)
                         fig_sub = px.bar(
                             subj_avg,
                             x="subject",
                             y="marks",
                             text_auto=True
                         )
-                        fig_sub.update_traces(textposition="outside")
+                        fig_sub.update_traces(textposition="outside", texttemplate="%{y:.0f}%")
+                        fig_sub.update_yaxes(tickformat=".0f", ticksuffix="%")
                         st.plotly_chart(fig_sub, use_container_width=True, key=f"{fig_sub}_{exam}_{i}")
 
                     # -------- TAB 3: STUDENT AVG --------
                     with tab3:
                         st.subheader("Student-wise Average Marks")
                         stu_avg = edf.groupby("student")["marks"].mean().reset_index()
+                        stu_avg["marks"] = stu_avg["marks"].round(0)
                         fig_stu = px.bar(
                             stu_avg,
                             x="marks",
@@ -286,7 +297,8 @@ if st.session_state.level == "class":
                             orientation='h',
                             text_auto=True
                         )
-                        fig_stu.update_traces(textposition="outside")
+                        fig_stu.update_traces(textposition="outside", texttemplate="%{x:.0f}%")
+                        fig_stu.update_xaxes(tickformat=".0f", ticksuffix="%")
                         st.plotly_chart(fig_stu, use_container_width=True, key=f"{fig_stu}_{exam}_{i}")
 
                     # -------- TAB 4: ATTENDANCE --------
