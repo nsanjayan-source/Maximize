@@ -84,11 +84,30 @@ def get_subject_avg(df_exam):
 
 
 def get_attendance(df_exam):
-    classes = df_exam["class"].unique()
-    return pd.DataFrame({
-        "class": classes,
-        "attendance": np.random.randint(75, 100, len(classes))
-    })
+    """
+    Placeholder attendance generator.
+    Returns class-section rows (e.g., 8A, 8B) so School view can chart section-wise.
+    """
+    out = (
+        df_exam[["class", "section"]]
+        .dropna(subset=["class", "section"])
+        .drop_duplicates()
+        .copy()
+    )
+    out["class"] = out["class"].astype(str).str.strip()
+    out["section"] = out["section"].astype(str).str.strip()
+    out["class_section"] = out["class"] + out["section"]
+
+    # Sort like 8A, 8B, 9A... even if class is stored as text
+    out["_class_num"] = pd.to_numeric(out["class"], errors="coerce")
+    out = out.sort_values(
+        by=["_class_num", "class", "section"],
+        ascending=[True, True, True],
+        kind="stable",
+    ).drop(columns=["_class_num"])
+
+    out["attendance"] = np.random.randint(75, 100, len(out))
+    return out[["class", "section", "class_section", "attendance"]]
 
 # ---------------- LOGIN ----------------
 if "user" not in st.session_state:
@@ -229,16 +248,22 @@ if st.session_state.level == "school":
 
                 # ---------------- TAB 4: ATTENDANCE ----------------
                 with tab4:
-                    st.subheader("Class-wise Attendance (%)")
+                    st.subheader("Class-section-wise Attendance (%)")
                     att = get_attendance(edf)
                     fig_att = px.bar(
                         att,
                         x="attendance",
-                        y="class",
+                        y="class_section",
                         orientation='h',
                         text_auto=True
                     )
                     fig_att.update_traces(textposition="outside")
+                    fig_att.update_yaxes(
+                        type="category",
+                        categoryorder="array",
+                        categoryarray=att["class_section"].tolist(),
+                        title_text="Class-Section",
+                    )
                     st.plotly_chart(fig_att, use_container_width=True, key=f"{fig_att}_{exam}_{i}")
 
         if st.button("Drill to Class"):
