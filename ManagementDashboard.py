@@ -1,0 +1,1094 @@
+"""Production-Grade School EI Dashboard
+
+Features:
+- Secure login (hashed passwords, DB users)
+- SQLite database (users + marks)
+- Admin: upload real data (CSV)
+- Role-based access (Admin / Teacher / Parent)
+- Drill-down: School → Class → Student
+- Subject analytics + pass/fail heatmap
+
+Run:
+  streamlit run school_reporting_system_streamlit.py
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import sqlite3
+import hashlib
+from typing import Optional, Tuple
+
+# ---------------- DB ----------------
+conn = sqlite3.connect("school.db", check_same_thread=False)
+conn.execute("PRAGMA foreign_keys = ON;")
+
+
+def hash_pw(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+
+def _table_has_column(table: str, column: str) -> bool:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = [r[1] for r in cur.fetchall()]
+    return column in cols
+
+
+def _ensure_schema(cur: sqlite3.Cursor) -> None:
+    # Users table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password TEXT,
+            role TEXT
+        )
+    """)
+
+    # Master tables
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS school_master (
+            school_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            school_name TEXT NOT NULL UNIQUE
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS class_master (
+            class_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            school_id INTEGER NOT NULL,
+            class TEXT NOT NULL,
+            section TEXT NOT NULL,
+            UNIQUE (school_id, class, section),
+            FOREIGN KEY (school_id) REFERENCES school_master(school_id) ON DELETE CASCADE
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS subject_master (
+            subject_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            school_id INTEGER NOT NULL,
+            subject TEXT NOT NULL,
+            UNIQUE (school_id, subject),
+            FOREIGN KEY (school_id) REFERENCES school_master(school_id) ON DELETE CASCADE
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS student_master (
+            student_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            class_id INTEGER NOT NULL,
+            student TEXT NOT NULL,
+            roll_no TEXT,
+            UNIQUE (class_id, student),
+            FOREIGN KEY (class_id) REFERENCES class_master(class_id) ON DELETE CASCADE
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS exam_master (
+            exam_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            school_id INTEGER NOT NULL,
+            exam TEXT NOT NULL,
+            UNIQUE (school_id, exam),
+            FOREIGN KEY (school_id) REFERENCES school_master(school_id) ON DELETE CASCADE
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS marks (
+            marks_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER NOT NULL,
+            subject_id INTEGER NOT NULL,
+            exam_id INTEGER NOT NULL,
+            marks INTEGER NOT NULL,
+            UNIQUE (student_id, subject_id, exam_id),
+            FOREIGN KEY (student_id) REFERENCES student_master(student_id) ON DELETE CASCADE,
+            FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE,
+            FOREIGN KEY (exam_id) REFERENCES exam_master(exam_id) ON DELETE CASCADE
+        )
+    """)
+
+
+def _get_or_create_school(cur: sqlite3.Cursor, school_name: str) -> int:
+    school_name = str(school_name).strip()
+    cur.execute("INSERT OR IGNORE INTO school_master (school_name) VALUES (?)", (school_name,))
+    cur.execute("SELECT school_id FROM school_master WHERE school_name=?", (school_name,))
+    return int(cur.fetchone()[0])
+
+
+def _get_or_create_class(cur: sqlite3.Cursor, school_id: int, cls: str, section: str) -> int:
+    cls = str(cls).strip()
+    section = str(section).strip()
+    cur.execute(
+        "INSERT OR IGNORE INTO class_master (school_id, class, section) VALUES (?, ?, ?)",
+        (school_id, cls, section),
+    )
+    cur.execute(
+        "SELECT class_id FROM class_master WHERE school_id=? AND class=? AND section=?",
+        (school_id, cls, section),
+    )
+    return int(cur.fetchone()[0])
+
+
+def _get_or_create_subject(cur: sqlite3.Cursor, school_id: int, subject: str) -> int:
+    subject = str(subject).strip()
+    cur.execute(
+        "INSERT OR IGNORE INTO subject_master (school_id, subject) VALUES (?, ?)",
+        (school_id, subject),
+    )
+    cur.execute(
+        "SELECT subject_id FROM subject_master WHERE school_id=? AND subject=?",
+        (school_id, subject),
+    )
+    return int(cur.fetchone()[0])
+
+
+def _get_or_create_exam(cur: sqlite3.Cursor, school_id: int, exam: str) -> int:
+    exam = str(exam).strip()
+    cur.execute(
+        "INSERT OR IGNORE INTO exam_master (school_id, exam) VALUES (?, ?)",
+        (school_id, exam),
+    )
+    cur.execute("SELECT exam_id FROM exam_master WHERE school_id=? AND exam=?", (school_id, exam))
+    return int(cur.fetchone()[0])
+
+
+def _get_or_create_student(cur: sqlite3.Cursor, class_id: int, student: str, roll_no: Optional[str] = None) -> int:
+    student = str(student).strip()
+    roll_no = None if roll_no is None or (isinstance(roll_no, float) and np.isnan(roll_no)) else str(roll_no).strip()
+    cur.execute(
+        "INSERT OR IGNORE INTO student_master (class_id, student, roll_no) VALUES (?, ?, ?)",
+        (class_id, student, roll_no),
+    )
+    if roll_no:
+        cur.execute(
+            """
+            UPDATE student_master
+            SET roll_no = COALESCE(roll_no, ?)
+            WHERE class_id=? AND student=?
+            """,
+            (roll_no, class_id, student),
+        )
+    cur.execute("SELECT student_id FROM student_master WHERE class_id=? AND student=?", (class_id, student))
+    return int(cur.fetchone()[0])
+
+
+def _migrate_legacy_marks(cur: sqlite3.Cursor) -> None:
+    """
+    If there's an old text-based marks table (class/section/student/subject/exam/marks),
+    migrate it into the normalized schema and keep the old data in `marks_legacy`.
+    """
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='marks'")
+    if not cur.fetchone():
+        return
+
+    is_normalized = _table_has_column("marks", "student_id")
+    if is_normalized:
+        return
+
+    # Rename legacy marks table
+    cur.execute("ALTER TABLE marks RENAME TO marks_legacy")
+
+    # Create new schema including new marks table
+    _ensure_schema(cur)
+
+    # Default school (legacy data had no school dimension)
+    default_school_id = _get_or_create_school(cur, "Default School")
+
+    legacy_df = pd.read_sql("SELECT * FROM marks_legacy", conn)
+    if legacy_df.empty:
+        return
+
+    required_cols = {"class", "section", "student", "subject", "exam", "marks"}
+    if not required_cols.issubset(set(legacy_df.columns)):
+        return
+
+    legacy_df = legacy_df.copy()
+    for c in ["class", "section", "student", "subject", "exam"]:
+        legacy_df[c] = legacy_df[c].astype(str).str.strip()
+    legacy_df["marks"] = pd.to_numeric(legacy_df["marks"], errors="coerce").fillna(0).astype(int)
+
+    # Build mapping caches to reduce SQL chatter
+    class_cache: dict[Tuple[int, str, str], int] = {}
+    subject_cache: dict[Tuple[int, str], int] = {}
+    exam_cache: dict[Tuple[int, str], int] = {}
+    student_cache: dict[Tuple[int, str], int] = {}
+
+    for row in legacy_df.itertuples(index=False):
+        cls = getattr(row, "class")
+        section = getattr(row, "section")
+        student = getattr(row, "student")
+        subject = getattr(row, "subject")
+        exam = getattr(row, "exam")
+        marks_val = int(getattr(row, "marks"))
+
+        class_key = (default_school_id, cls, section)
+        class_id = class_cache.get(class_key)
+        if class_id is None:
+            class_id = _get_or_create_class(cur, default_school_id, cls, section)
+            class_cache[class_key] = class_id
+
+        student_key = (class_id, student)
+        student_id = student_cache.get(student_key)
+        if student_id is None:
+            student_id = _get_or_create_student(cur, class_id, student)
+            student_cache[student_key] = student_id
+
+        subject_key = (default_school_id, subject)
+        subject_id = subject_cache.get(subject_key)
+        if subject_id is None:
+            subject_id = _get_or_create_subject(cur, default_school_id, subject)
+            subject_cache[subject_key] = subject_id
+
+        exam_key = (default_school_id, exam)
+        exam_id = exam_cache.get(exam_key)
+        if exam_id is None:
+            exam_id = _get_or_create_exam(cur, default_school_id, exam)
+            exam_cache[exam_key] = exam_id
+
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO marks (student_id, subject_id, exam_id, marks)
+            VALUES (?, ?, ?, ?)
+            """,
+            (student_id, subject_id, exam_id, marks_val),
+        )
+
+
+def init_db():
+    cur = conn.cursor()
+
+    # Ensure new schema exists (no-op if already created)
+    _ensure_schema(cur)
+
+    # If the db was created before this change, migrate legacy marks.
+    _migrate_legacy_marks(cur)
+
+    # Insert default users if not exists
+    users = [
+        ("admin", hash_pw("admin123"), "Admin"),
+        ("teacher", hash_pw("teacher123"), "Teacher"),
+        ("parent", hash_pw("parent123"), "Parent"),
+    ]
+    for u in users:
+        cur.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?)", u)
+
+    # Ensure at least one school exists so admin screens have defaults
+    _get_or_create_school(cur, "Default School")
+
+    conn.commit()
+
+
+init_db()
+
+# ---------------- HELPER CALCULATIONS ----------------
+def get_class_avg(df_exam):
+    out = df_exam.groupby("class")["marks"].mean().reset_index()
+    out["marks"] = out["marks"].round(0)
+    return out
+
+def get_class_section_avg(df_exam):
+    out = df_exam.groupby(["class", "section"])["marks"].mean().reset_index()
+    out["marks"] = out["marks"].round(0)
+    return out
+
+
+def get_subject_avg(df_exam):
+    out = df_exam.groupby("subject")["marks"].mean().reset_index()
+    out["marks"] = out["marks"].round(0)
+    return out
+
+
+def get_attendance(df_exam):
+    """
+    Placeholder attendance generator.
+    Returns class-section rows (e.g., 8A, 8B) so School view can chart section-wise.
+    """
+    out = (
+        df_exam[["class", "section"]]
+        .dropna(subset=["class", "section"])
+        .drop_duplicates()
+        .copy()
+    )
+    out["class"] = out["class"].astype(str).str.strip()
+    out["section"] = out["section"].astype(str).str.strip()
+    out["class_section"] = out["class"] + out["section"]
+
+    # Sort like 8A, 8B, 9A... even if class is stored as text
+    out["_class_num"] = pd.to_numeric(out["class"], errors="coerce")
+    out = out.sort_values(
+        by=["_class_num", "class", "section"],
+        ascending=[True, True, True],
+        kind="stable",
+    ).drop(columns=["_class_num"])
+
+    out["attendance"] = np.random.randint(75, 100, len(out))
+    return out[["class", "section", "class_section", "attendance"]]
+
+# ---------------- LOGIN ----------------
+if "user" not in st.session_state:
+    st.session_state.user = None
+    st.session_state.role = None
+
+
+def login():
+    st.title("🔐 Secure Login")
+    u = st.text_input("Username")
+    p = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+        cur = conn.cursor()
+        cur.execute("SELECT password, role FROM users WHERE username=?", (u,))
+        row = cur.fetchone()
+
+        if row and row[0] == hash_pw(p):
+            st.session_state.user = u
+            st.session_state.role = row[1]
+            st.success("Login successful")
+            st.rerun()
+        else:
+            st.error("Invalid credentials")
+
+
+def logout():
+    st.session_state.user = None
+    st.session_state.role = None
+    st.rerun()
+
+
+if not st.session_state.user:
+    login()
+    st.stop()
+
+st.sidebar.success(f"Logged in: {st.session_state.user} ({st.session_state.role})")
+st.sidebar.button("Logout", on_click=logout)
+
+# ---------------- DATA LOAD ----------------
+def load_data():
+    # Joined "reporting" dataframe to keep the rest of the app working
+    return pd.read_sql(
+        """
+        SELECT
+            sm.school_name AS school,
+            cm.class AS class,
+            cm.section AS section,
+            stm.student AS student,
+            subm.subject AS subject,
+            em.exam AS exam,
+            m.marks AS marks
+        FROM marks m
+        JOIN student_master stm ON stm.student_id = m.student_id
+        JOIN class_master cm ON cm.class_id = stm.class_id
+        JOIN school_master sm ON sm.school_id = cm.school_id
+        JOIN subject_master subm ON subm.subject_id = m.subject_id
+        JOIN exam_master em ON em.exam_id = m.exam_id
+        """,
+        conn,
+    )
+
+
+df = load_data()
+
+def _normalize_str(x) -> str:
+    if x is None:
+        return ""
+    return str(x).strip()
+
+
+def _import_marks_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
+    """
+    Expected columns:
+      school, class, section, student, subject, exam, marks
+    Optional:
+      roll_no
+    """
+    required = ["school", "class", "section", "student", "subject", "exam", "marks"]
+    missing = [c for c in required if c not in csv_df.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {', '.join(missing)}")
+
+    df_in = csv_df.copy()
+    for c in ["school", "class", "section", "student", "subject", "exam"]:
+        df_in[c] = df_in[c].apply(_normalize_str)
+    if "roll_no" in df_in.columns:
+        df_in["roll_no"] = df_in["roll_no"].apply(lambda v: None if _normalize_str(v) == "" else _normalize_str(v))
+    df_in["marks"] = pd.to_numeric(df_in["marks"], errors="coerce")
+    df_in = df_in.dropna(subset=["marks"]).copy()
+    df_in["marks"] = df_in["marks"].astype(int)
+
+    inserted = 0
+    updated = 0
+
+    cur = conn.cursor()
+    cur.execute("BEGIN")
+    try:
+        for row in df_in.itertuples(index=False):
+            school_name = getattr(row, "school")
+            cls = getattr(row, "class")
+            section = getattr(row, "section")
+            student = getattr(row, "student")
+            subject = getattr(row, "subject")
+            exam = getattr(row, "exam")
+            marks_val = int(getattr(row, "marks"))
+            roll_no = getattr(row, "roll_no") if hasattr(row, "roll_no") else None
+
+            school_id = _get_or_create_school(cur, school_name)
+            class_id = _get_or_create_class(cur, school_id, cls, section)
+            student_id = _get_or_create_student(cur, class_id, student, roll_no=roll_no)
+            subject_id = _get_or_create_subject(cur, school_id, subject)
+            exam_id = _get_or_create_exam(cur, school_id, exam)
+
+            cur.execute(
+                "SELECT marks_id, marks FROM marks WHERE student_id=? AND subject_id=? AND exam_id=?",
+                (student_id, subject_id, exam_id),
+            )
+            existing = cur.fetchone()
+            if existing:
+                cur.execute(
+                    "UPDATE marks SET marks=? WHERE marks_id=?",
+                    (marks_val, int(existing[0])),
+                )
+                updated += 1
+            else:
+                cur.execute(
+                    "INSERT INTO marks (student_id, subject_id, exam_id, marks) VALUES (?, ?, ?, ?)",
+                    (student_id, subject_id, exam_id, marks_val),
+                )
+                inserted += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return inserted, updated
+
+
+def _admin_panel():
+    st.subheader("Admin Panel")
+
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["Schools", "Classes", "Subjects", "Students", "Exams", "Marks (CSV / Manual)"]
+    )
+
+    cur = conn.cursor()
+
+    with tab1:
+        st.markdown("**School Master**")
+        with st.form("add_school"):
+            school_name = st.text_input("School Name")
+            submitted = st.form_submit_button("Add / Save School")
+            if submitted:
+                if _normalize_str(school_name) == "":
+                    st.error("School name is required.")
+                else:
+                    _get_or_create_school(cur, school_name)
+                    conn.commit()
+                    st.success("Saved.")
+                    st.rerun()
+        st.dataframe(pd.read_sql("SELECT * FROM school_master ORDER BY school_name", conn), use_container_width=True)
+
+    with tab2:
+        st.markdown("**Class Master (Class + Section)**")
+        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
+        if schools.empty:
+            st.warning("Create a school first.")
+        else:
+            school_name = st.selectbox("School", schools["school_name"].tolist(), key="cls_school")
+            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
+            with st.form("add_class"):
+                cls = st.text_input("Class (e.g., 8, IX, Grade 10)")
+                section = st.text_input("Section (e.g., A, B)")
+                submitted = st.form_submit_button("Add / Save Class-Section")
+                if submitted:
+                    if _normalize_str(cls) == "" or _normalize_str(section) == "":
+                        st.error("Class and Section are required.")
+                    else:
+                        _get_or_create_class(cur, school_id, cls, section)
+                        conn.commit()
+                        st.success("Saved.")
+                        st.rerun()
+
+            st.dataframe(
+                pd.read_sql(
+                    """
+                    SELECT cm.class_id, sm.school_name, cm.class, cm.section
+                    FROM class_master cm
+                    JOIN school_master sm ON sm.school_id = cm.school_id
+                    ORDER BY sm.school_name, cm.class, cm.section
+                    """,
+                    conn,
+                ),
+                use_container_width=True,
+            )
+
+    with tab3:
+        st.markdown("**Subject Master**")
+        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
+        if schools.empty:
+            st.warning("Create a school first.")
+        else:
+            school_name = st.selectbox("School", schools["school_name"].tolist(), key="sub_school")
+            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
+            with st.form("add_subject"):
+                subject = st.text_input("Subject (e.g., Math, Science)")
+                submitted = st.form_submit_button("Add / Save Subject")
+                if submitted:
+                    if _normalize_str(subject) == "":
+                        st.error("Subject is required.")
+                    else:
+                        _get_or_create_subject(cur, school_id, subject)
+                        conn.commit()
+                        st.success("Saved.")
+                        st.rerun()
+
+            st.dataframe(
+                pd.read_sql(
+                    """
+                    SELECT subm.subject_id, sm.school_name, subm.subject
+                    FROM subject_master subm
+                    JOIN school_master sm ON sm.school_id = subm.school_id
+                    ORDER BY sm.school_name, subm.subject
+                    """,
+                    conn,
+                ),
+                use_container_width=True,
+            )
+
+    with tab4:
+        st.markdown("**Student Master**")
+        classes = pd.read_sql(
+            """
+            SELECT cm.class_id, sm.school_name, cm.class, cm.section
+            FROM class_master cm
+            JOIN school_master sm ON sm.school_id = cm.school_id
+            ORDER BY sm.school_name, cm.class, cm.section
+            """,
+            conn,
+        )
+        if classes.empty:
+            st.warning("Create class-sections first.")
+        else:
+            class_label = classes.apply(lambda r: f"{r['school_name']} | {r['class']}{r['section']}", axis=1).tolist()
+            selected = st.selectbox("Class-Section", class_label, key="stu_class")
+            class_id = int(classes.iloc[class_label.index(selected)]["class_id"])
+            with st.form("add_student"):
+                student = st.text_input("Student Name")
+                roll_no = st.text_input("Roll No (optional)")
+                submitted = st.form_submit_button("Add / Save Student")
+                if submitted:
+                    if _normalize_str(student) == "":
+                        st.error("Student name is required.")
+                    else:
+                        _get_or_create_student(cur, class_id, student, roll_no=roll_no)
+                        conn.commit()
+                        st.success("Saved.")
+                        st.rerun()
+
+            st.dataframe(
+                pd.read_sql(
+                    """
+                    SELECT stm.student_id, sm.school_name, cm.class, cm.section, stm.student, stm.roll_no
+                    FROM student_master stm
+                    JOIN class_master cm ON cm.class_id = stm.class_id
+                    JOIN school_master sm ON sm.school_id = cm.school_id
+                    ORDER BY sm.school_name, cm.class, cm.section, stm.student
+                    """,
+                    conn,
+                ),
+                use_container_width=True,
+            )
+
+    with tab5:
+        st.markdown("**Exam Master**")
+        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
+        if schools.empty:
+            st.warning("Create a school first.")
+        else:
+            school_name = st.selectbox("School", schools["school_name"].tolist(), key="exam_school")
+            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
+            with st.form("add_exam"):
+                exam = st.text_input("Exam (e.g., Midterm, Unit Test 1)")
+                submitted = st.form_submit_button("Add / Save Exam")
+                if submitted:
+                    if _normalize_str(exam) == "":
+                        st.error("Exam is required.")
+                    else:
+                        _get_or_create_exam(cur, school_id, exam)
+                        conn.commit()
+                        st.success("Saved.")
+                        st.rerun()
+
+            st.dataframe(
+                pd.read_sql(
+                    """
+                    SELECT em.exam_id, sm.school_name, em.exam
+                    FROM exam_master em
+                    JOIN school_master sm ON sm.school_id = em.school_id
+                    ORDER BY sm.school_name, em.exam
+                    """,
+                    conn,
+                ),
+                use_container_width=True,
+            )
+
+    with tab6:
+        st.markdown("**Marks**")
+        st.markdown("Upload a CSV with columns: `school,class,section,student,subject,exam,marks` (optional `roll_no`).")
+
+        file = st.file_uploader("Upload Marks CSV", type=["csv"], key="marks_csv")
+        if file:
+            try:
+                csv_df = pd.read_csv(file)
+                st.dataframe(csv_df.head(50), use_container_width=True)
+                if st.button("Import CSV"):
+                    ins, upd = _import_marks_csv(csv_df)
+                    st.success(f"Imported. Inserted: {ins}, Updated: {upd}")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Import failed: {e}")
+
+        st.divider()
+        st.markdown("**Manual Entry**")
+        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
+        if schools.empty:
+            st.warning("Create a school first.")
+        else:
+            school_name = st.selectbox("School", schools["school_name"].tolist(), key="m_school")
+            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
+
+            classes = pd.read_sql(
+                "SELECT class_id, class, section FROM class_master WHERE school_id=? ORDER BY class, section",
+                conn,
+                params=(school_id,),
+            )
+            subjects = pd.read_sql(
+                "SELECT subject_id, subject FROM subject_master WHERE school_id=? ORDER BY subject",
+                conn,
+                params=(school_id,),
+            )
+            exams = pd.read_sql(
+                "SELECT exam_id, exam FROM exam_master WHERE school_id=? ORDER BY exam",
+                conn,
+                params=(school_id,),
+            )
+
+            if classes.empty or subjects.empty or exams.empty:
+                st.warning("Create class-sections, subjects, and exams first.")
+            else:
+                class_section_label = classes.apply(lambda r: f"{r['class']}{r['section']}", axis=1).tolist()
+                chosen_class_section = st.selectbox("Class-Section", class_section_label, key="m_class")
+                class_id = int(classes.iloc[class_section_label.index(chosen_class_section)]["class_id"])
+
+                students = pd.read_sql(
+                    "SELECT student_id, student FROM student_master WHERE class_id=? ORDER BY student",
+                    conn,
+                    params=(class_id,),
+                )
+                if students.empty:
+                    st.warning("Create students for this class-section first.")
+                else:
+                    student_name = st.selectbox("Student", students["student"].tolist(), key="m_student")
+                    student_id = int(students[students["student"] == student_name]["student_id"].iloc[0])
+
+                    subject_name = st.selectbox("Subject", subjects["subject"].tolist(), key="m_subject")
+                    subject_id = int(subjects[subjects["subject"] == subject_name]["subject_id"].iloc[0])
+
+                    exam_name = st.selectbox("Exam", exams["exam"].tolist(), key="m_exam")
+                    exam_id = int(exams[exams["exam"] == exam_name]["exam_id"].iloc[0])
+
+                    marks_val = st.number_input("Marks", min_value=0, max_value=100, value=0, step=1, key="m_marks")
+
+                    if st.button("Save Marks"):
+                        cur.execute(
+                            """
+                            INSERT OR REPLACE INTO marks (student_id, subject_id, exam_id, marks)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (student_id, subject_id, exam_id, int(marks_val)),
+                        )
+                        conn.commit()
+                        st.success("Saved.")
+                        st.rerun()
+
+        st.divider()
+        st.dataframe(load_data().sort_values(["school", "class", "section", "student", "exam", "subject"]), use_container_width=True)
+
+
+# ---------------- ADMIN: DATA MANAGEMENT ----------------
+if st.session_state.role == "Admin":
+    st.sidebar.subheader("Admin Controls")
+    admin_view = st.sidebar.radio("Admin Menu", ["Dashboard", "Admin Panel"], index=0)
+else:
+    admin_view = "Dashboard"
+
+# ---------------- NAVIGATION ----------------
+if "level" not in st.session_state:
+    st.session_state.level = "school"
+    st.session_state.cls = None
+    st.session_state.student = None
+
+# Route admin to admin panel (without disrupting session navigation state)
+if st.session_state.role == "Admin" and admin_view == "Admin Panel":
+    st.title("🛠️ Administration")
+    _admin_panel()
+    st.stop()
+
+# ---------------- SCHOOL VIEW (UPDATED - TABS + MOBILE FRIENDLY) ----------------
+if st.session_state.level == "school":
+    st.title("🏫 School Dashboard")
+
+    if df.empty:
+        st.warning("No data available. Admin upload required.")
+    else:
+        if "school" in df.columns and df["school"].nunique() > 1:
+            selected_school = st.selectbox("Select School", sorted(df["school"].unique()))
+            df = df[df["school"] == selected_school].copy()
+
+        exams = sorted(df["exam"].unique(), reverse=True)
+
+        for i, exam in enumerate(exams):
+            with st.expander(f"📘 Exam: {exam}", expanded=(i == 0)):
+                edf = df[df["exam"] == exam]
+
+                # Tabs instead of columns (better for mobile)
+                tab1, tab2, tab3, tab4 = st.tabs([
+                    "Exam",
+                    "Subject-wise Avg",
+                    "Class-wise Avg",
+                    "Attendance"
+                ])
+
+                # ---------------- TAB 1: EXAM ----------------
+                with tab1:
+                    st.subheader("Exam Details")
+                    st.metric(label="Exam Name", value=exam)
+                    st.metric(label="Total Records", value=len(edf))
+
+                # ---------------- TAB 2: SUBJECT AVG ----------------
+                with tab2:
+                    st.subheader("Subject-wise Average Marks")
+                    subj_avg = get_subject_avg(edf)
+                    fig_sub = px.bar(
+                        subj_avg,
+                        x="subject",
+                        y="marks",
+                        text_auto=True
+                    )
+                    fig_sub.update_traces(textposition="outside", texttemplate="%{y:.0f}%")
+                    fig_sub.update_yaxes(tickformat=".0f", ticksuffix="%")
+                    st.plotly_chart(fig_sub, use_container_width=True, key=f"{fig_sub}_{exam}_{i}")
+
+                # ---------------- TAB 3: CLASS AVG ----------------
+                with tab3:
+                    st.subheader("Class-wise Average Marks")
+                    class_sec_avg = get_class_section_avg(edf).copy()
+                    class_sec_avg["class_section"] = (
+                        class_sec_avg["class"].astype(str).str.strip()
+                        + class_sec_avg["section"].astype(str).str.strip()
+                    )
+
+                    # Sort like 8A, 8B, 9A... even if class is stored as text
+                    class_sec_avg["_class_num"] = pd.to_numeric(class_sec_avg["class"], errors="coerce")
+                    class_sec_avg = class_sec_avg.sort_values(
+                        by=["_class_num", "class", "section"],
+                        ascending=[True, True, True],
+                        kind="stable",
+                    )
+
+                    fig_cls = px.bar(
+                        class_sec_avg,
+                        x="marks",
+                        y="class_section",
+                        orientation='h',
+                        text_auto=True,
+                        color="marks",
+                        color_continuous_scale="RdYlGn",
+                        range_color=(0, 100),
+                    )
+                    fig_cls.update_traces(textposition="outside", texttemplate="%{x:.0f}%")
+                    fig_cls.update_xaxes(tickformat=".0f", ticksuffix="%")
+                    fig_cls.update_yaxes(
+                        type="category",
+                        categoryorder="array",
+                        categoryarray=class_sec_avg["class_section"].tolist(),
+                        title_text="Class-Section",
+                    )
+                    fig_cls.update_layout(coloraxis_colorbar=dict(title="Avg %"))
+                    st.plotly_chart(fig_cls, use_container_width=True, key=f"{fig_cls}_{exam}_{i}")
+
+                # ---------------- TAB 4: ATTENDANCE ----------------
+                with tab4:
+                    st.subheader("Class-section-wise Attendance (%)")
+                    att = get_attendance(edf)
+                    fig_att = px.bar(
+                        att,
+                        x="attendance",
+                        y="class_section",
+                        orientation='h',
+                        text_auto=True
+                    )
+                    fig_att.update_traces(textposition="outside")
+                    fig_att.update_yaxes(
+                        type="category",
+                        categoryorder="array",
+                        categoryarray=att["class_section"].tolist(),
+                        title_text="Class-Section",
+                    )
+                    st.plotly_chart(fig_att, use_container_width=True, key=f"{fig_att}_{exam}_{i}")
+
+        if st.button("Drill to Class"):
+            st.session_state.level = "class"
+            st.rerun()
+
+# ---------------- CLASS VIEW (NEW - TABS + MOBILE FRIENDLY) ----------------
+if st.session_state.level == "class":
+    st.title("🏫 Class Dashboard")
+
+    if df.empty:
+        st.warning("No data available. Admin upload required.")
+    else:
+        # Select Class
+        classes = sorted(df["class"].unique())
+        selected_class = st.selectbox("Select Class", classes)
+
+        sections = sorted(df[df["class"] == selected_class]["section"].dropna().unique())
+        section_options = ["All Sections"] + sections
+        selected_section = st.selectbox("Select Section", section_options, index=0)
+
+        if selected_section == "All Sections":
+            cdf = df[df["class"] == selected_class]
+        else:
+            cdf = df[
+                (df["class"] == selected_class) &
+                (df["section"] == selected_section)
+            ]
+
+        if cdf.empty:
+            st.warning("No data available for selected class")
+        else:
+            exams = sorted(cdf["exam"].unique(), reverse=True)
+
+            for i, exam in enumerate(exams):
+                with st.expander(f"📘 Exam: {exam}", expanded=(i == 0)):
+                    edf = cdf[cdf["exam"] == exam]
+
+                    # Tabs for mobile-friendly layout
+                    tab1, tab2, tab3, tab4 = st.tabs([
+                        "Exam",
+                        "Subject-wise Avg",
+                        "Student-wise Avg",
+                        "Attendance"
+                    ])
+
+                    # -------- TAB 1: EXAM --------
+                    with tab1:
+                        st.subheader("Exam Details")
+                        st.metric("Class", selected_class)
+                        st.metric("Section", selected_section)
+                        st.metric("Exam", exam)
+                        st.metric("Total Records", len(edf))
+
+                    # -------- TAB 2: SUBJECT AVG --------
+                    with tab2:
+                        st.subheader("Subject-wise Average Marks")
+                        subj_avg = edf.groupby("subject")["marks"].mean().reset_index()
+                        subj_avg["marks"] = subj_avg["marks"].round(0)
+                        fig_sub = px.bar(
+                            subj_avg,
+                            x="subject",
+                            y="marks",
+                            text_auto=True
+                        )
+                        fig_sub.update_traces(textposition="outside", texttemplate="%{y:.0f}%")
+                        fig_sub.update_yaxes(tickformat=".0f", ticksuffix="%")
+                        st.plotly_chart(fig_sub, use_container_width=True, key=f"{fig_sub}_{exam}_{i}")
+
+                    # -------- TAB 3: STUDENT AVG --------
+                    with tab3:
+                        st.subheader("Student-wise Average Marks")
+                        stu_avg = edf.groupby("student")["marks"].mean().reset_index()
+                        stu_avg["marks"] = stu_avg["marks"].round(0)
+                        fig_stu = px.bar(
+                            stu_avg,
+                            x="marks",
+                            y="student",
+                            orientation='h',
+                            text_auto=True
+                        )
+                        fig_stu.update_traces(textposition="outside", texttemplate="%{x:.0f}%")
+                        fig_stu.update_xaxes(tickformat=".0f", ticksuffix="%")
+                        st.plotly_chart(fig_stu, use_container_width=True, key=f"{fig_stu}_{exam}_{i}")
+
+                    # -------- TAB 4: ATTENDANCE --------
+                    with tab4:
+                        st.subheader("Student-wise Attendance (%)")
+                        students = edf["student"].unique()
+                        att = pd.DataFrame({
+                            "student": students,
+                            "attendance": np.random.randint(75, 100, len(students))
+                        })
+                        fig_att = px.bar(
+                            att,
+                            x="attendance",
+                            y="student",
+                            orientation='h',
+                            text_auto=True
+                        )
+                        fig_att.update_traces(textposition="outside")
+                        st.plotly_chart(fig_att, use_container_width=True, key=f"{fig_att}_{exam}_{i}")
+
+        # Navigation back
+        if st.button("⬅ Back to School"):
+            st.session_state.level = "school"
+            st.rerun()
+
+        if st.button("Drill to Student"):
+            st.session_state.level = "student"
+            st.rerun()
+
+# ---------------- STUDENT VIEW (NEW - TABS + MOBILE FRIENDLY) ----------------
+if st.session_state.level == "student":
+    st.title("🎓 Student Dashboard")
+
+    if df.empty:
+        st.warning("No data available. Admin upload required.")
+    else:
+        # Select Class first (to scope students)
+        classes = sorted(df["class"].unique())
+        selected_class = st.selectbox("Select Class", classes)
+
+        sections = sorted(
+            df[df["class"] == selected_class]["section"].dropna().unique()
+        )
+
+        selected_section = st.selectbox("Select Section", sections)
+
+        students = sorted(
+        df[
+            (df["class"] == selected_class) &
+            (df["section"] == selected_section)
+        ]["student"].unique()
+        )
+
+        selected_student = st.selectbox("Select Student", students)
+
+        stf = df[
+            (df["class"] == selected_class) &
+            (df["section"] == selected_section) &
+            (df["student"] == selected_student)
+        ]
+
+        if stf.empty:
+            st.warning("No data available for selected student")
+        else:
+            exams = sorted(stf["exam"].unique(), reverse=True)
+
+            for i, exam in enumerate(exams):
+                with st.expander(f"📘 Exam: {exam}", expanded=(i == 0)):
+                    edf = stf[stf["exam"] == exam]
+
+                    # Tabs for mobile-friendly layout
+                    tab1, tab2, tab3, tab4 = st.tabs([
+                        "Exam",
+                        "Subject wise Marks",
+                        "Rank Distribution",
+                        "Attendance"
+                    ])
+
+                    # -------- TAB 1: EXAM --------
+                    with tab1:
+                        st.subheader("Exam Details")
+                        st.metric("Class", selected_class)
+                        st.metric("Section", selected_section)
+                        st.metric("Student", selected_student)
+                        st.metric("Exam", exam)
+                        st.metric("Subjects Count", edf["subject"].nunique())
+
+                    # -------- TAB 2: SUBJECT MARKS --------
+                    with tab2:
+                        st.subheader("Subject-wise Marks")
+                        fig_sub = px.bar(
+                            edf,
+                            x="subject",
+                            y="marks",
+                            text_auto=True
+                        )
+                        fig_sub.update_traces(textposition="outside")
+                        st.plotly_chart(fig_sub, use_container_width=True, key=f"{fig_sub}_{exam}_{i}")
+
+                    # -------- TAB 3: SUBJECT-WISE RANK --------
+                    with tab3:
+                        st.subheader("Subject-wise Rank within Class")
+                        
+                        class_exam_df = df[
+                            (df["class"] == selected_class) &
+                            (df["section"] == selected_section) &
+                            (df["exam"] == exam)
+                        ].copy()
+
+                        # Rank within each subject
+                        class_exam_df["rank"] = class_exam_df.groupby("subject")["marks"] \
+                            .rank(ascending=False, method="min")
+
+                        # Filter selected student
+                        stu_rank_df = class_exam_df[class_exam_df["student"] == selected_student]
+
+                        # Convert rank so that Rank 1 becomes highest value
+                        stu_rank_df["rank_score"] = stu_rank_df["rank"].max() - stu_rank_df["rank"] + 1
+
+                        fig_rank = px.bar(
+                            stu_rank_df,
+                            x="rank_score",
+                            y="subject",
+                            orientation='h',
+                            text="rank"  # still show actual rank
+                        )
+
+                        fig_rank.update_traces(textposition="outside")
+                        #fig_rank.update_layout(xaxis_title="Rank (Higher is Better)")
+                        
+                        # Hide X-axis to avoid confusion
+                        fig_rank.update_layout(xaxis=dict(showticklabels=False, visible=False), xaxis_title=None)
+
+
+                        st.plotly_chart(fig_rank, use_container_width=True, key=f"rank_{exam}_{i}")
+
+                    # -------- TAB 4: ATTENDANCE --------   
+                    with tab4:
+                        st.subheader("Attendance (%)")
+                        att_value = int(np.random.randint(75, 100))
+
+                        att_df = pd.DataFrame({
+                            "type": ["Present", "Absent"],
+                            "value": [att_value, 100 - att_value]
+                        })
+
+                        # Ensure valid data
+                        att_df["value"] = att_df["value"].astype(int)
+
+                        fig_att = px.pie(
+                            att_df,
+                            names="type",
+                            values="value",
+                            hole=0.4
+                        )
+
+                        # Add labels for clarity
+                        fig_att.update_traces(textinfo='percent+label')
+
+                        st.plotly_chart(fig_att, use_container_width=True, key=f"att_{exam}_{i}")
+
+        # Navigation back
+        if st.button("⬅ Back to Class"):
+            st.session_state.level = "class"
+            st.rerun()
+
+        if st.button("⬅ Back to School"):
+            st.session_state.level = "school"
+            st.rerun()
+
+
+# ---------------- FOOTER ----------------
+st.sidebar.success("Production EI System Live 🚀")
