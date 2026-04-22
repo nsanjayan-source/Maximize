@@ -174,34 +174,7 @@ def _migrate_schema_additions(cur: sqlite3.Cursor) -> None:
         )
     """)
 
-    if not _table_has_column("student_master", "academic_year"):
-        cur.execute(
-            f"ALTER TABLE student_master ADD COLUMN academic_year TEXT NOT NULL DEFAULT '{CURRENT_ACADEMIC_YEAR}'"
-        )
-        cur.execute("UPDATE student_master SET academic_year=? WHERE academic_year IS NULL", (CURRENT_ACADEMIC_YEAR,))
-
-    if not _table_has_column("exam_master", "academic_year"):
-        cur.execute(
-            f"ALTER TABLE exam_master ADD COLUMN academic_year TEXT NOT NULL DEFAULT '{CURRENT_ACADEMIC_YEAR}'"
-        )
-        cur.execute("UPDATE exam_master SET academic_year=? WHERE academic_year IS NULL", (CURRENT_ACADEMIC_YEAR,))
-
-    if not _table_has_column("exam_master", "start_date"):
-        cur.execute("ALTER TABLE exam_master ADD COLUMN start_date TEXT")
-
-    if not _table_has_column("exam_master", "end_date"):
-        cur.execute("ALTER TABLE exam_master ADD COLUMN end_date TEXT")
-
-    if not _table_has_column("class_master", "Academic_Year"):
-        cur.execute(
-            f"ALTER TABLE class_master ADD COLUMN Academic_Year TEXT NOT NULL DEFAULT '{CURRENT_ACADEMIC_YEAR}'"
-        )
-        cur.execute("UPDATE class_master SET Academic_Year=? WHERE Academic_Year IS NULL", (CURRENT_ACADEMIC_YEAR,))
-
-    if not _table_has_column("class_master", "class_teacher"):
-        cur.execute("ALTER TABLE class_master ADD COLUMN class_teacher INTEGER")
-
-
+   
 def _get_or_create_school(cur: sqlite3.Cursor, school_name: str) -> int:
     school_name = str(school_name).strip()
     cur.execute("INSERT OR IGNORE INTO school_master (school_name) VALUES (?)", (school_name,))
@@ -676,7 +649,7 @@ def _admin_panel():
     st.subheader("Admin Panel")
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
-        ["Schools", "Classes", "Subjects", "Students", "Teachers", "Teacher-Class Master", "Exams", "Marks (CSV / Manual)"]
+        ["Schools", "Classes", "Subjects", "Students", "Teachers", "Teacher-Class-Subject", "Exams", "Marks (CSV / Manual)"]
     )
 
     cur = conn.cursor()
