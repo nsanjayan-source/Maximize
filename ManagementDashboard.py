@@ -45,6 +45,19 @@ def _table_exists(table: str) -> bool:
     return cur.fetchone() is not None
 
 
+def _foreign_key_refs(table: str) -> list[tuple[str, str]]:
+    """
+    Returns list of (from_column, ref_table) for a given table.
+    """
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA foreign_key_list({table})")
+    out: list[tuple[str, str]] = []
+    for row in cur.fetchall():
+        # row schema: (id, seq, table, from, to, on_update, on_delete, match)
+        out.append((str(row[3]), str(row[2])))
+    return out
+
+
 def _ensure_schema(cur: sqlite3.Cursor) -> None:
     # Users table
     cur.execute("""
@@ -60,6 +73,20 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
         CREATE TABLE IF NOT EXISTS school_master (
             school_id INTEGER PRIMARY KEY AUTOINCREMENT,
             school_name TEXT NOT NULL UNIQUE
+        )
+    """)
+
+    # Student master (personal details, independent of class assignment)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS student_master (
+            student_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_name TEXT NOT NULL,
+            father_name TEXT,
+            mother_name TEXT,
+            father_contact TEXT,
+            mother_contact TEXT,
+            address TEXT,
+            UNIQUE (student_name, father_contact, mother_contact)
         )
     """)
 
@@ -89,13 +116,14 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS student_class (
-            student_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER PRIMARY KEY,
             class_id INTEGER NOT NULL,
             student TEXT NOT NULL,
             roll_no TEXT,
             academic_year TEXT NOT NULL DEFAULT '2025-2026',
             UNIQUE (class_id, student),
-            FOREIGN KEY (class_id) REFERENCES class_master(class_id) ON DELETE CASCADE
+            FOREIGN KEY (class_id) REFERENCES class_master(class_id) ON DELETE CASCADE,
+            FOREIGN KEY (student_id) REFERENCES student_master(student_id) ON DELETE CASCADE
         )
     """)
 
@@ -143,7 +171,7 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
             exam_id INTEGER NOT NULL,
             marks INTEGER NOT NULL,
             UNIQUE (student_id, subject_id, exam_id),
-            FOREIGN KEY (student_id) REFERENCES student_class(student_id) ON DELETE CASCADE,
+            FOREIGN KEY (student_id) REFERENCES student_master(student_id) ON DELETE CASCADE,
             FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE,
             FOREIGN KEY (exam_id) REFERENCES exam_master(exam_id) ON DELETE CASCADE
         )
@@ -185,6 +213,67 @@ def _migrate_schema_additions(cur: sqlite3.Cursor) -> None:
         cur.execute("ALTER TABLE student_master RENAME TO student_class")
 
    
+def _migrate_student_master_and_links(cur: sqlite3.Cursor) -> None:
+    """
+    Adds `student_master` (requested) and ensures student_id is linked everywhere.
+
+    For existing DBs that already have `student_class(student_id, student, ...)`:
+    - Creates `student_master` if missing.
+    - Inserts one row per `student_class.student_id` into `student_master` (preserving IDs).
+    - Rebuilds `marks` to reference `student_master` (SQLite requires table rebuild for FK changes).
+    """
+    # Ensure student_master exists (new schema has it, but old DBs may not)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS student_master (
+            student_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_name TEXT NOT NULL,
+            father_name TEXT,
+            mother_name TEXT,
+            father_contact TEXT,
+            mother_contact TEXT,
+            address TEXT,
+            UNIQUE (student_name, father_contact, mother_contact)
+        )
+    """)
+
+    # Backfill student_master from existing student_class rows (preserve student_id)
+    if _table_exists("student_class") and _table_has_column("student_class", "student_id") and _table_has_column("student_class", "student"):
+        cur.execute("""
+            INSERT OR IGNORE INTO student_master (student_id, student_name)
+            SELECT student_id, student
+            FROM student_class
+            WHERE student_id IS NOT NULL AND TRIM(COALESCE(student, '')) <> ''
+        """)
+
+    # If marks FK still points to student_class, rebuild marks to reference student_master
+    if _table_exists("marks"):
+        fk = _foreign_key_refs("marks")
+        needs_rebuild = any((from_col == "student_id" and ref_table == "student_class") for from_col, ref_table in fk)
+        if needs_rebuild:
+            # Rename old table
+            cur.execute("ALTER TABLE marks RENAME TO marks_old_fk_student_class")
+            # Create new marks with correct FK
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS marks (
+                    marks_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    student_id INTEGER NOT NULL,
+                    subject_id INTEGER NOT NULL,
+                    exam_id INTEGER NOT NULL,
+                    marks INTEGER NOT NULL,
+                    UNIQUE (student_id, subject_id, exam_id),
+                    FOREIGN KEY (student_id) REFERENCES student_master(student_id) ON DELETE CASCADE,
+                    FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE,
+                    FOREIGN KEY (exam_id) REFERENCES exam_master(exam_id) ON DELETE CASCADE
+                )
+            """)
+            # Copy data
+            cur.execute("""
+                INSERT INTO marks (marks_id, student_id, subject_id, exam_id, marks)
+                SELECT marks_id, student_id, subject_id, exam_id, marks
+                FROM marks_old_fk_student_class
+            """)
+
+
 def _get_or_create_school(cur: sqlite3.Cursor, school_name: str) -> int:
     school_name = str(school_name).strip()
     cur.execute("INSERT OR IGNORE INTO school_master (school_name) VALUES (?)", (school_name,))
@@ -276,16 +365,28 @@ def _get_or_create_teacher_class_sub(cur: sqlite3.Cursor, teacher_id: int, class
 def _get_or_create_student(cur: sqlite3.Cursor, class_id: int, student: str, roll_no: Optional[str] = None) -> int:
     student = str(student).strip()
     roll_no = None if roll_no is None or (isinstance(roll_no, float) and np.isnan(roll_no)) else str(roll_no).strip()
-    if _table_has_column("student_class", "academic_year"):
-        cur.execute(
-            "INSERT OR IGNORE INTO student_class (class_id, student, roll_no, academic_year) VALUES (?, ?, ?, ?)",
-            (class_id, student, roll_no, CURRENT_ACADEMIC_YEAR),
-        )
+
+    # If already mapped for this class, ensure a student_master row exists and return id.
+    cur.execute("SELECT student_id, roll_no FROM student_class WHERE class_id=? AND student=?", (class_id, student))
+    existing = cur.fetchone()
+    if existing:
+        student_id = int(existing[0])
+        cur.execute("INSERT OR IGNORE INTO student_master (student_id, student_name) VALUES (?, ?)", (student_id, student))
     else:
-        cur.execute(
-            "INSERT OR IGNORE INTO student_class (class_id, student, roll_no) VALUES (?, ?, ?)",
-            (class_id, student, roll_no),
-        )
+        # Create student_master first to generate a stable student_id, then map into student_class.
+        cur.execute("INSERT INTO student_master (student_name) VALUES (?)", (student,))
+        student_id = int(cur.lastrowid)
+        if _table_has_column("student_class", "academic_year"):
+            cur.execute(
+                "INSERT OR IGNORE INTO student_class (student_id, class_id, student, roll_no, academic_year) VALUES (?, ?, ?, ?, ?)",
+                (student_id, class_id, student, roll_no, CURRENT_ACADEMIC_YEAR),
+            )
+        else:
+            cur.execute(
+                "INSERT OR IGNORE INTO student_class (student_id, class_id, student, roll_no) VALUES (?, ?, ?, ?)",
+                (student_id, class_id, student, roll_no),
+            )
+
     if roll_no:
         cur.execute(
             """
@@ -304,8 +405,8 @@ def _get_or_create_student(cur: sqlite3.Cursor, class_id: int, student: str, rol
             """,
             (CURRENT_ACADEMIC_YEAR, class_id, student),
         )
-    cur.execute("SELECT student_id FROM student_class WHERE class_id=? AND student=?", (class_id, student))
-    return int(cur.fetchone()[0])
+
+    return int(student_id)
 
 
 def _migrate_legacy_marks(cur: sqlite3.Cursor) -> None:
@@ -401,6 +502,9 @@ def init_db():
 
     # Backfill additive schema changes (columns/tables) for existing DBs.
     _migrate_schema_additions(cur)
+
+    # Add requested student_master + re-link student_id FKs.
+    _migrate_student_master_and_links(cur)
 
     # Insert default users if not exists
     users = [
@@ -510,11 +614,12 @@ def load_data():
             sm.school_name AS school,
             cm.class AS class,
             cm.section AS section,
-            stm.student AS student,
+            COALESCE(smm.student_name, stm.student) AS student,
             subm.subject AS subject,
             em.exam AS exam,
             m.marks AS marks
         FROM marks m
+        JOIN student_master smm ON smm.student_id = m.student_id
         JOIN student_class stm ON stm.student_id = m.student_id
         JOIN class_master cm ON cm.class_id = stm.class_id
         JOIN school_master sm ON sm.school_id = cm.school_id
