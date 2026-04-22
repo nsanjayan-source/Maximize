@@ -763,8 +763,18 @@ def _import_marks_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
 def _admin_panel():
     st.subheader("Admin Panel")
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
-        ["Schools", "Classes", "Subjects", "Students", "Teachers", "Teacher-Class-Subject", "Exams", "Marks (CSV / Manual)"]
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
+        [
+            "Schools",
+            "Classes",
+            "Subjects",
+            "Student Class",
+            "Student Master",
+            "Teachers",
+            "Teacher-Class-Subject",
+            "Exams",
+            "Marks (CSV / Manual)",
+        ]
     )
 
     cur = conn.cursor()
@@ -918,6 +928,114 @@ def _admin_panel():
             )
 
     with tab5:
+        st.markdown("**Student Master (Personal Details)**")
+        st.markdown("Create / update a student profile. Class assignment happens under **Student Class**.")
+
+        students = pd.read_sql(
+            "SELECT student_id, student_name FROM student_master ORDER BY student_name, student_id",
+            conn,
+        )
+        selected_student_id: Optional[int] = None
+
+        options = ["+ Create new"] + (
+            students.apply(lambda r: f"{r['student_name']} (ID: {int(r['student_id'])})", axis=1).tolist()
+            if not students.empty
+            else []
+        )
+        chosen = st.selectbox("Student", options, key="sm_pick")
+        if chosen != "+ Create new":
+            selected_student_id = int(chosen.split("ID:")[1].replace(")", "").strip())
+
+        existing = None
+        if selected_student_id is not None:
+            existing = pd.read_sql(
+                """
+                SELECT student_id, student_name, father_name, mother_name, father_contact, mother_contact, address
+                FROM student_master
+                WHERE student_id = ?
+                """,
+                conn,
+                params=(selected_student_id,),
+            )
+            if not existing.empty:
+                existing = existing.iloc[0].to_dict()
+            else:
+                existing = None
+
+        with st.form("student_master_form"):
+            student_name = st.text_input("Student Name", value="" if not existing else str(existing.get("student_name") or ""))
+            father_name = st.text_input("Father Name", value="" if not existing else str(existing.get("father_name") or ""))
+            mother_name = st.text_input("Mother Name", value="" if not existing else str(existing.get("mother_name") or ""))
+            father_contact = st.text_input(
+                "Father Contact",
+                value="" if not existing else str(existing.get("father_contact") or ""),
+            )
+            mother_contact = st.text_input(
+                "Mother Contact",
+                value="" if not existing else str(existing.get("mother_contact") or ""),
+            )
+            address = st.text_area("Address", value="" if not existing else str(existing.get("address") or ""))
+
+            submitted = st.form_submit_button("Add / Save Student Master")
+            if submitted:
+                if _normalize_str(student_name) == "":
+                    st.error("Student name is required.")
+                else:
+                    if selected_student_id is None:
+                        cur.execute(
+                            """
+                            INSERT OR IGNORE INTO student_master
+                                (student_name, father_name, mother_name, father_contact, mother_contact, address)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                student_name.strip(),
+                                father_name.strip() or None,
+                                mother_name.strip() or None,
+                                father_contact.strip() or None,
+                                mother_contact.strip() or None,
+                                address.strip() or None,
+                            ),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            UPDATE student_master
+                            SET student_name = ?,
+                                father_name = ?,
+                                mother_name = ?,
+                                father_contact = ?,
+                                mother_contact = ?,
+                                address = ?
+                            WHERE student_id = ?
+                            """,
+                            (
+                                student_name.strip(),
+                                father_name.strip() or None,
+                                mother_name.strip() or None,
+                                father_contact.strip() or None,
+                                mother_contact.strip() or None,
+                                address.strip() or None,
+                                int(selected_student_id),
+                            ),
+                        )
+                    conn.commit()
+                    st.success("Saved.")
+                    st.rerun()
+
+        st.dataframe(
+            pd.read_sql(
+                """
+                SELECT student_id, student_name, father_name, mother_name, father_contact, mother_contact, address
+                FROM student_master
+                ORDER BY student_name, student_id
+                """,
+                conn,
+            ),
+            use_container_width=True,
+        )
+
+    with tab6:
         st.markdown("**Teacher Master**")
         schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
         if schools.empty:
@@ -950,7 +1068,7 @@ def _admin_panel():
                 use_container_width=True,
             )
 
-    with tab6:
+    with tab7:
         st.markdown("**Teacher Class Master (Teacher → Class-Section → Subject)**")
         schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
         if schools.empty:
@@ -1016,7 +1134,7 @@ def _admin_panel():
                 use_container_width=True,
             )
 
-    with tab7:
+    with tab8:
         st.markdown("**Exam Master**")
         st.markdown(f"Academic year in DB defaults to `{CURRENT_ACADEMIC_YEAR}`.")
         schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
@@ -1066,7 +1184,7 @@ def _admin_panel():
                 use_container_width=True,
             )
 
-    with tab8:
+    with tab9:
         st.markdown("**Marks**")
         st.markdown("Upload a CSV with columns: `school,class,section,student,subject,exam,marks` (optional `roll_no`).")
 
