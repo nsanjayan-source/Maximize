@@ -18,6 +18,7 @@ import numpy as np
 import plotly.express as px
 import sqlite3
 import hashlib
+import datetime as dt
 from typing import Optional, Tuple
 
 # ---------------- DB ----------------
@@ -98,6 +99,8 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
             school_id INTEGER NOT NULL,
             exam TEXT NOT NULL,
             academic_year TEXT NOT NULL DEFAULT '2025-2026',
+            start_date TEXT,
+            end_date TEXT,
             UNIQUE (school_id, exam),
             FOREIGN KEY (school_id) REFERENCES school_master(school_id) ON DELETE CASCADE
         )
@@ -183,6 +186,12 @@ def _migrate_schema_additions(cur: sqlite3.Cursor) -> None:
         )
         cur.execute("UPDATE exam_master SET academic_year=? WHERE academic_year IS NULL", (CURRENT_ACADEMIC_YEAR,))
 
+    if not _table_has_column("exam_master", "start_date"):
+        cur.execute("ALTER TABLE exam_master ADD COLUMN start_date TEXT")
+
+    if not _table_has_column("exam_master", "end_date"):
+        cur.execute("ALTER TABLE exam_master ADD COLUMN end_date TEXT")
+
     if not _table_has_column("class_master", "Academic_Year"):
         cur.execute(
             f"ALTER TABLE class_master ADD COLUMN Academic_Year TEXT NOT NULL DEFAULT '{CURRENT_ACADEMIC_YEAR}'"
@@ -229,7 +238,13 @@ def _get_or_create_subject(cur: sqlite3.Cursor, school_id: int, subject: str) ->
 
 def _get_or_create_exam(cur: sqlite3.Cursor, school_id: int, exam: str) -> int:
     exam = str(exam).strip()
-    if _table_has_column("exam_master", "academic_year"):
+    # Backwards-compatible insert for older DBs (but we migrate first on startup)
+    if _table_has_column("exam_master", "academic_year") and _table_has_column("exam_master", "start_date") and _table_has_column("exam_master", "end_date"):
+        cur.execute(
+            "INSERT OR IGNORE INTO exam_master (school_id, exam, academic_year, start_date, end_date) VALUES (?, ?, ?, NULL, NULL)",
+            (school_id, exam, CURRENT_ACADEMIC_YEAR),
+        )
+    elif _table_has_column("exam_master", "academic_year"):
         cur.execute(
             "INSERT OR IGNORE INTO exam_master (school_id, exam, academic_year) VALUES (?, ?, ?)",
             (school_id, exam, CURRENT_ACADEMIC_YEAR),
@@ -240,6 +255,38 @@ def _get_or_create_exam(cur: sqlite3.Cursor, school_id: int, exam: str) -> int:
             (school_id, exam),
         )
     cur.execute("SELECT exam_id FROM exam_master WHERE school_id=? AND exam=?", (school_id, exam))
+    return int(cur.fetchone()[0])
+
+
+def _get_or_create_teacher(cur: sqlite3.Cursor, school_id: int, teacher_name: str) -> int:
+    teacher_name = str(teacher_name).strip()
+    cur.execute(
+        "INSERT OR IGNORE INTO teacher_master (school_id, teacher_name) VALUES (?, ?)",
+        (school_id, teacher_name),
+    )
+    cur.execute(
+        "SELECT teacher_id FROM teacher_master WHERE school_id=? AND teacher_name=?",
+        (school_id, teacher_name),
+    )
+    return int(cur.fetchone()[0])
+
+
+def _get_or_create_teacher_class_sub(cur: sqlite3.Cursor, teacher_id: int, class_id: int, subject_id: int) -> int:
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO teacher_class_sub (teacher_id, class_id, subject_id)
+        VALUES (?, ?, ?)
+        """,
+        (teacher_id, class_id, subject_id),
+    )
+    cur.execute(
+        """
+        SELECT teacher_class_sub_id
+        FROM teacher_class_sub
+        WHERE teacher_id=? AND class_id=? AND subject_id=?
+        """,
+        (teacher_id, class_id, subject_id),
+    )
     return int(cur.fetchone()[0])
 
 
@@ -628,8 +675,8 @@ def _import_marks_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
 def _admin_panel():
     st.subheader("Admin Panel")
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-        ["Schools", "Classes", "Subjects", "Students", "Exams", "Marks (CSV / Manual)"]
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+        ["Schools", "Classes", "Subjects", "Students", "Teachers", "Teacher-Class Master", "Exams", "Marks (CSV / Manual)"]
     )
 
     cur = conn.cursor()
@@ -783,6 +830,105 @@ def _admin_panel():
             )
 
     with tab5:
+        st.markdown("**Teacher Master**")
+        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
+        if schools.empty:
+            st.warning("Create a school first.")
+        else:
+            school_name = st.selectbox("School", schools["school_name"].tolist(), key="t_school")
+            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
+            with st.form("add_teacher"):
+                teacher_name = st.text_input("Teacher Name")
+                submitted = st.form_submit_button("Add / Save Teacher")
+                if submitted:
+                    if _normalize_str(teacher_name) == "":
+                        st.error("Teacher name is required.")
+                    else:
+                        _get_or_create_teacher(cur, school_id, teacher_name)
+                        conn.commit()
+                        st.success("Saved.")
+                        st.rerun()
+
+            st.dataframe(
+                pd.read_sql(
+                    """
+                    SELECT tm.teacher_id, sm.school_name, tm.teacher_name
+                    FROM teacher_master tm
+                    JOIN school_master sm ON sm.school_id = tm.school_id
+                    ORDER BY sm.school_name, tm.teacher_name
+                    """,
+                    conn,
+                ),
+                use_container_width=True,
+            )
+
+    with tab6:
+        st.markdown("**Teacher Class Master (Teacher → Class-Section → Subject)**")
+        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
+        if schools.empty:
+            st.warning("Create a school first.")
+        else:
+            school_name = st.selectbox("School", schools["school_name"].tolist(), key="tcs_school")
+            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
+
+            teachers = pd.read_sql(
+                "SELECT teacher_id, teacher_name FROM teacher_master WHERE school_id=? ORDER BY teacher_name",
+                conn,
+                params=(school_id,),
+            )
+            classes = pd.read_sql(
+                "SELECT class_id, class, section FROM class_master WHERE school_id=? ORDER BY class, section",
+                conn,
+                params=(school_id,),
+            )
+            subjects = pd.read_sql(
+                "SELECT subject_id, subject FROM subject_master WHERE school_id=? ORDER BY subject",
+                conn,
+                params=(school_id,),
+            )
+
+            if teachers.empty or classes.empty or subjects.empty:
+                st.warning("Create teachers, class-sections, and subjects first.")
+            else:
+                teacher_name = st.selectbox("Teacher", teachers["teacher_name"].tolist(), key="tcs_teacher")
+                teacher_id = int(teachers[teachers["teacher_name"] == teacher_name]["teacher_id"].iloc[0])
+
+                class_section_label = classes.apply(lambda r: f"{r['class']}{r['section']}", axis=1).tolist()
+                chosen_class_section = st.selectbox("Class-Section", class_section_label, key="tcs_class")
+                class_id = int(classes.iloc[class_section_label.index(chosen_class_section)]["class_id"])
+
+                subject_name = st.selectbox("Subject", subjects["subject"].tolist(), key="tcs_subject")
+                subject_id = int(subjects[subjects["subject"] == subject_name]["subject_id"].iloc[0])
+
+                if st.button("Add / Save Teacher-Class-Subject"):
+                    _get_or_create_teacher_class_sub(cur, teacher_id, class_id, subject_id)
+                    conn.commit()
+                    st.success("Saved.")
+                    st.rerun()
+
+            st.dataframe(
+                pd.read_sql(
+                    """
+                    SELECT
+                        tcs.teacher_class_sub_id,
+                        sm.school_name,
+                        tm.teacher_name,
+                        cm.class,
+                        cm.section,
+                        subm.subject
+                    FROM teacher_class_sub tcs
+                    JOIN teacher_master tm ON tm.teacher_id = tcs.teacher_id
+                    JOIN class_master cm ON cm.class_id = tcs.class_id
+                    JOIN subject_master subm ON subm.subject_id = tcs.subject_id
+                    JOIN school_master sm ON sm.school_id = tm.school_id
+                    ORDER BY sm.school_name, tm.teacher_name, cm.class, cm.section, subm.subject
+                    """,
+                    conn,
+                ),
+                use_container_width=True,
+            )
+
+    with tab7:
         st.markdown("**Exam Master**")
         st.markdown(f"Academic year in DB defaults to `{CURRENT_ACADEMIC_YEAR}`.")
         schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
@@ -793,12 +939,25 @@ def _admin_panel():
             school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
             with st.form("add_exam"):
                 exam = st.text_input("Exam (e.g., Midterm, Unit Test 1)")
+                use_dates = st.checkbox("Set start/end dates", value=False)
+                start_date = st.date_input("Start Date", value=dt.date.today(), disabled=(not use_dates))
+                end_date = st.date_input("End Date", value=dt.date.today(), disabled=(not use_dates))
                 submitted = st.form_submit_button("Add / Save Exam")
                 if submitted:
                     if _normalize_str(exam) == "":
                         st.error("Exam is required.")
                     else:
-                        _get_or_create_exam(cur, school_id, exam)
+                        exam_id = _get_or_create_exam(cur, school_id, exam)
+                        if use_dates and _table_has_column("exam_master", "start_date") and _table_has_column("exam_master", "end_date"):
+                            cur.execute(
+                                """
+                                UPDATE exam_master
+                                SET start_date = COALESCE(start_date, ?),
+                                    end_date = COALESCE(end_date, ?)
+                                WHERE exam_id=?
+                                """,
+                                (start_date.isoformat(), end_date.isoformat(), exam_id),
+                            )
                         conn.commit()
                         st.success("Saved.")
                         st.rerun()
@@ -807,7 +966,8 @@ def _admin_panel():
                 pd.read_sql(
                     """
                     SELECT em.exam_id, sm.school_name, em.exam,
-                           COALESCE(em.academic_year, ?) AS academic_year
+                           COALESCE(em.academic_year, ?) AS academic_year,
+                           em.start_date, em.end_date
                     FROM exam_master em
                     JOIN school_master sm ON sm.school_id = em.school_id
                     ORDER BY sm.school_name, em.exam
@@ -818,7 +978,7 @@ def _admin_panel():
                 use_container_width=True,
             )
 
-    with tab6:
+    with tab8:
         st.markdown("**Marks**")
         st.markdown("Upload a CSV with columns: `school,class,section,student,subject,exam,marks` (optional `roll_no`).")
 
