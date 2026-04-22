@@ -39,6 +39,12 @@ def _table_has_column(table: str, column: str) -> bool:
     return column in cols
 
 
+def _table_exists(table: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    return cur.fetchone() is not None
+
+
 def _ensure_schema(cur: sqlite3.Cursor) -> None:
     # Users table
     cur.execute("""
@@ -82,7 +88,7 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
     """)
 
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS student_master (
+        CREATE TABLE IF NOT EXISTS student_class (
             student_id INTEGER PRIMARY KEY AUTOINCREMENT,
             class_id INTEGER NOT NULL,
             student TEXT NOT NULL,
@@ -137,7 +143,7 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
             exam_id INTEGER NOT NULL,
             marks INTEGER NOT NULL,
             UNIQUE (student_id, subject_id, exam_id),
-            FOREIGN KEY (student_id) REFERENCES student_master(student_id) ON DELETE CASCADE,
+            FOREIGN KEY (student_id) REFERENCES student_class(student_id) ON DELETE CASCADE,
             FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE,
             FOREIGN KEY (exam_id) REFERENCES exam_master(exam_id) ON DELETE CASCADE
         )
@@ -173,6 +179,10 @@ def _migrate_schema_additions(cur: sqlite3.Cursor) -> None:
             FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE
         )
     """)
+
+    # Table rename: student_master -> student_class (keep existing DBs working)
+    if _table_exists("student_master") and not _table_exists("student_class"):
+        cur.execute("ALTER TABLE student_master RENAME TO student_class")
 
    
 def _get_or_create_school(cur: sqlite3.Cursor, school_name: str) -> int:
@@ -266,35 +276,35 @@ def _get_or_create_teacher_class_sub(cur: sqlite3.Cursor, teacher_id: int, class
 def _get_or_create_student(cur: sqlite3.Cursor, class_id: int, student: str, roll_no: Optional[str] = None) -> int:
     student = str(student).strip()
     roll_no = None if roll_no is None or (isinstance(roll_no, float) and np.isnan(roll_no)) else str(roll_no).strip()
-    if _table_has_column("student_master", "academic_year"):
+    if _table_has_column("student_class", "academic_year"):
         cur.execute(
-            "INSERT OR IGNORE INTO student_master (class_id, student, roll_no, academic_year) VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO student_class (class_id, student, roll_no, academic_year) VALUES (?, ?, ?, ?)",
             (class_id, student, roll_no, CURRENT_ACADEMIC_YEAR),
         )
     else:
         cur.execute(
-            "INSERT OR IGNORE INTO student_master (class_id, student, roll_no) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO student_class (class_id, student, roll_no) VALUES (?, ?, ?)",
             (class_id, student, roll_no),
         )
     if roll_no:
         cur.execute(
             """
-            UPDATE student_master
+            UPDATE student_class
             SET roll_no = COALESCE(roll_no, ?)
             WHERE class_id=? AND student=?
             """,
             (roll_no, class_id, student),
         )
-    if _table_has_column("student_master", "academic_year"):
+    if _table_has_column("student_class", "academic_year"):
         cur.execute(
             """
-            UPDATE student_master
+            UPDATE student_class
             SET academic_year = COALESCE(academic_year, ?)
             WHERE class_id=? AND student=?
             """,
             (CURRENT_ACADEMIC_YEAR, class_id, student),
         )
-    cur.execute("SELECT student_id FROM student_master WHERE class_id=? AND student=?", (class_id, student))
+    cur.execute("SELECT student_id FROM student_class WHERE class_id=? AND student=?", (class_id, student))
     return int(cur.fetchone()[0])
 
 
@@ -505,7 +515,7 @@ def load_data():
             em.exam AS exam,
             m.marks AS marks
         FROM marks m
-        JOIN student_master stm ON stm.student_id = m.student_id
+        JOIN student_class stm ON stm.student_id = m.student_id
         JOIN class_master cm ON cm.class_id = stm.class_id
         JOIN school_master sm ON sm.school_id = cm.school_id
         JOIN subject_master subm ON subm.subject_id = m.subject_id
@@ -559,11 +569,11 @@ def _import_students_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
             school_id = _get_or_create_school(cur, school_name)
             class_id = _get_or_create_class(cur, school_id, cls, section)
 
-            cur.execute("SELECT student_id, roll_no FROM student_master WHERE class_id=? AND student=?", (class_id, student))
+            cur.execute("SELECT student_id, roll_no FROM student_class WHERE class_id=? AND student=?", (class_id, student))
             existing = cur.fetchone()
             if existing:
                 if roll_no:
-                    cur.execute("UPDATE student_master SET roll_no = COALESCE(roll_no, ?) WHERE student_id=?", (roll_no, int(existing[0])))
+                    cur.execute("UPDATE student_class SET roll_no = COALESCE(roll_no, ?) WHERE student_id=?", (roll_no, int(existing[0])))
                     updated += 1
             else:
                 _get_or_create_student(cur, class_id, student, roll_no=roll_no)
@@ -740,7 +750,7 @@ def _admin_panel():
             )
 
     with tab4:
-        st.markdown("**Student Master**")
+        st.markdown("**Student Class**")
         st.markdown(f"Academic year in DB defaults to `{CURRENT_ACADEMIC_YEAR}`.")
 
         st.markdown("**Bulk upload (CSV)**")
@@ -791,7 +801,7 @@ def _admin_panel():
                     """
                     SELECT stm.student_id, sm.school_name, cm.class, cm.section, stm.student, stm.roll_no,
                            COALESCE(stm.academic_year, ?) AS academic_year
-                    FROM student_master stm
+                    FROM student_class stm
                     JOIN class_master cm ON cm.class_id = stm.class_id
                     JOIN school_master sm ON sm.school_id = cm.school_id
                     ORDER BY sm.school_name, cm.class, cm.section, stm.student
@@ -1000,7 +1010,7 @@ def _admin_panel():
                 class_id = int(classes.iloc[class_section_label.index(chosen_class_section)]["class_id"])
 
                 students = pd.read_sql(
-                    "SELECT student_id, student FROM student_master WHERE class_id=? ORDER BY student",
+                    "SELECT student_id, student FROM student_class WHERE class_id=? ORDER BY student",
                     conn,
                     params=(class_id,),
                 )
