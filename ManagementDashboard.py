@@ -24,6 +24,8 @@ from typing import Optional, Tuple
 conn = sqlite3.connect("school.db", check_same_thread=False)
 conn.execute("PRAGMA foreign_keys = ON;")
 
+CURRENT_ACADEMIC_YEAR = "2025-2026"
+
 
 def hash_pw(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
@@ -60,8 +62,11 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
             school_id INTEGER NOT NULL,
             class TEXT NOT NULL,
             section TEXT NOT NULL,
+            Academic_Year TEXT NOT NULL DEFAULT '2025-2026',
+            class_teacher INTEGER,
             UNIQUE (school_id, class, section),
-            FOREIGN KEY (school_id) REFERENCES school_master(school_id) ON DELETE CASCADE
+            FOREIGN KEY (school_id) REFERENCES school_master(school_id) ON DELETE CASCADE,
+            FOREIGN KEY (class_teacher) REFERENCES teacher_master(teacher_id) ON DELETE SET NULL
         )
     """)
 
@@ -81,6 +86,7 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
             class_id INTEGER NOT NULL,
             student TEXT NOT NULL,
             roll_no TEXT,
+            academic_year TEXT NOT NULL DEFAULT '2025-2026',
             UNIQUE (class_id, student),
             FOREIGN KEY (class_id) REFERENCES class_master(class_id) ON DELETE CASCADE
         )
@@ -91,8 +97,32 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
             exam_id INTEGER PRIMARY KEY AUTOINCREMENT,
             school_id INTEGER NOT NULL,
             exam TEXT NOT NULL,
+            academic_year TEXT NOT NULL DEFAULT '2025-2026',
             UNIQUE (school_id, exam),
             FOREIGN KEY (school_id) REFERENCES school_master(school_id) ON DELETE CASCADE
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS teacher_master (
+            teacher_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            school_id INTEGER NOT NULL,
+            teacher_name TEXT NOT NULL,
+            UNIQUE (school_id, teacher_name),
+            FOREIGN KEY (school_id) REFERENCES school_master(school_id) ON DELETE CASCADE
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS teacher_class_sub (
+            teacher_class_sub_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher_id INTEGER NOT NULL,
+            class_id INTEGER NOT NULL,
+            subject_id INTEGER NOT NULL,
+            UNIQUE (teacher_id, class_id, subject_id),
+            FOREIGN KEY (teacher_id) REFERENCES teacher_master(teacher_id) ON DELETE CASCADE,
+            FOREIGN KEY (class_id) REFERENCES class_master(class_id) ON DELETE CASCADE,
+            FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE
         )
     """)
 
@@ -109,6 +139,58 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
             FOREIGN KEY (exam_id) REFERENCES exam_master(exam_id) ON DELETE CASCADE
         )
     """)
+
+
+def _migrate_schema_additions(cur: sqlite3.Cursor) -> None:
+    """
+    Backfill schema changes for existing DBs (SQLite has limited ALTER capabilities).
+    - Adds academic year columns to student/exam
+    - Adds Academic_Year + class_teacher to class_master
+    - Ensures teacher tables exist
+    """
+    # Ensure new tables exist first (class_master FK references teacher_master in new DBs)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS teacher_master (
+            teacher_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            school_id INTEGER NOT NULL,
+            teacher_name TEXT NOT NULL,
+            UNIQUE (school_id, teacher_name),
+            FOREIGN KEY (school_id) REFERENCES school_master(school_id) ON DELETE CASCADE
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS teacher_class_sub (
+            teacher_class_sub_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher_id INTEGER NOT NULL,
+            class_id INTEGER NOT NULL,
+            subject_id INTEGER NOT NULL,
+            UNIQUE (teacher_id, class_id, subject_id),
+            FOREIGN KEY (teacher_id) REFERENCES teacher_master(teacher_id) ON DELETE CASCADE,
+            FOREIGN KEY (class_id) REFERENCES class_master(class_id) ON DELETE CASCADE,
+            FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE
+        )
+    """)
+
+    if not _table_has_column("student_master", "academic_year"):
+        cur.execute(
+            f"ALTER TABLE student_master ADD COLUMN academic_year TEXT NOT NULL DEFAULT '{CURRENT_ACADEMIC_YEAR}'"
+        )
+        cur.execute("UPDATE student_master SET academic_year=? WHERE academic_year IS NULL", (CURRENT_ACADEMIC_YEAR,))
+
+    if not _table_has_column("exam_master", "academic_year"):
+        cur.execute(
+            f"ALTER TABLE exam_master ADD COLUMN academic_year TEXT NOT NULL DEFAULT '{CURRENT_ACADEMIC_YEAR}'"
+        )
+        cur.execute("UPDATE exam_master SET academic_year=? WHERE academic_year IS NULL", (CURRENT_ACADEMIC_YEAR,))
+
+    if not _table_has_column("class_master", "Academic_Year"):
+        cur.execute(
+            f"ALTER TABLE class_master ADD COLUMN Academic_Year TEXT NOT NULL DEFAULT '{CURRENT_ACADEMIC_YEAR}'"
+        )
+        cur.execute("UPDATE class_master SET Academic_Year=? WHERE Academic_Year IS NULL", (CURRENT_ACADEMIC_YEAR,))
+
+    if not _table_has_column("class_master", "class_teacher"):
+        cur.execute("ALTER TABLE class_master ADD COLUMN class_teacher INTEGER")
 
 
 def _get_or_create_school(cur: sqlite3.Cursor, school_name: str) -> int:
@@ -147,10 +229,16 @@ def _get_or_create_subject(cur: sqlite3.Cursor, school_id: int, subject: str) ->
 
 def _get_or_create_exam(cur: sqlite3.Cursor, school_id: int, exam: str) -> int:
     exam = str(exam).strip()
-    cur.execute(
-        "INSERT OR IGNORE INTO exam_master (school_id, exam) VALUES (?, ?)",
-        (school_id, exam),
-    )
+    if _table_has_column("exam_master", "academic_year"):
+        cur.execute(
+            "INSERT OR IGNORE INTO exam_master (school_id, exam, academic_year) VALUES (?, ?, ?)",
+            (school_id, exam, CURRENT_ACADEMIC_YEAR),
+        )
+    else:
+        cur.execute(
+            "INSERT OR IGNORE INTO exam_master (school_id, exam) VALUES (?, ?)",
+            (school_id, exam),
+        )
     cur.execute("SELECT exam_id FROM exam_master WHERE school_id=? AND exam=?", (school_id, exam))
     return int(cur.fetchone()[0])
 
@@ -158,10 +246,16 @@ def _get_or_create_exam(cur: sqlite3.Cursor, school_id: int, exam: str) -> int:
 def _get_or_create_student(cur: sqlite3.Cursor, class_id: int, student: str, roll_no: Optional[str] = None) -> int:
     student = str(student).strip()
     roll_no = None if roll_no is None or (isinstance(roll_no, float) and np.isnan(roll_no)) else str(roll_no).strip()
-    cur.execute(
-        "INSERT OR IGNORE INTO student_master (class_id, student, roll_no) VALUES (?, ?, ?)",
-        (class_id, student, roll_no),
-    )
+    if _table_has_column("student_master", "academic_year"):
+        cur.execute(
+            "INSERT OR IGNORE INTO student_master (class_id, student, roll_no, academic_year) VALUES (?, ?, ?, ?)",
+            (class_id, student, roll_no, CURRENT_ACADEMIC_YEAR),
+        )
+    else:
+        cur.execute(
+            "INSERT OR IGNORE INTO student_master (class_id, student, roll_no) VALUES (?, ?, ?)",
+            (class_id, student, roll_no),
+        )
     if roll_no:
         cur.execute(
             """
@@ -170,6 +264,15 @@ def _get_or_create_student(cur: sqlite3.Cursor, class_id: int, student: str, rol
             WHERE class_id=? AND student=?
             """,
             (roll_no, class_id, student),
+        )
+    if _table_has_column("student_master", "academic_year"):
+        cur.execute(
+            """
+            UPDATE student_master
+            SET academic_year = COALESCE(academic_year, ?)
+            WHERE class_id=? AND student=?
+            """,
+            (CURRENT_ACADEMIC_YEAR, class_id, student),
         )
     cur.execute("SELECT student_id FROM student_master WHERE class_id=? AND student=?", (class_id, student))
     return int(cur.fetchone()[0])
@@ -265,6 +368,9 @@ def init_db():
 
     # If the db was created before this change, migrate legacy marks.
     _migrate_legacy_marks(cur)
+
+    # Backfill additive schema changes (columns/tables) for existing DBs.
+    _migrate_schema_additions(cur)
 
     # Insert default users if not exists
     users = [
@@ -397,6 +503,60 @@ def _normalize_str(x) -> str:
     return str(x).strip()
 
 
+def _import_students_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
+    """
+    Expected columns:
+      school, class, section, student
+    Optional:
+      roll_no
+    """
+    required = ["school", "class", "section", "student"]
+    missing = [c for c in required if c not in csv_df.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {', '.join(missing)}")
+
+    df_in = csv_df.copy()
+    for c in ["school", "class", "section", "student"]:
+        df_in[c] = df_in[c].apply(_normalize_str)
+    if "roll_no" in df_in.columns:
+        df_in["roll_no"] = df_in["roll_no"].apply(lambda v: None if _normalize_str(v) == "" else _normalize_str(v))
+
+    df_in = df_in[df_in["school"].ne("") & df_in["class"].ne("") & df_in["section"].ne("") & df_in["student"].ne("")].copy()
+
+    inserted = 0
+    updated = 0
+
+    cur = conn.cursor()
+    cur.execute("BEGIN")
+    try:
+        for row in df_in.itertuples(index=False):
+            school_name = getattr(row, "school")
+            cls = getattr(row, "class")
+            section = getattr(row, "section")
+            student = getattr(row, "student")
+            roll_no = getattr(row, "roll_no") if hasattr(row, "roll_no") else None
+
+            school_id = _get_or_create_school(cur, school_name)
+            class_id = _get_or_create_class(cur, school_id, cls, section)
+
+            cur.execute("SELECT student_id, roll_no FROM student_master WHERE class_id=? AND student=?", (class_id, student))
+            existing = cur.fetchone()
+            if existing:
+                if roll_no:
+                    cur.execute("UPDATE student_master SET roll_no = COALESCE(roll_no, ?) WHERE student_id=?", (roll_no, int(existing[0])))
+                    updated += 1
+            else:
+                _get_or_create_student(cur, class_id, student, roll_no=roll_no)
+                inserted += 1
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return inserted, updated
+
+
 def _import_marks_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
     """
     Expected columns:
@@ -513,12 +673,15 @@ def _admin_panel():
             st.dataframe(
                 pd.read_sql(
                     """
-                    SELECT cm.class_id, sm.school_name, cm.class, cm.section
+                    SELECT cm.class_id, sm.school_name, cm.class, cm.section,
+                           COALESCE(cm.Academic_Year, ?) AS Academic_Year,
+                           cm.class_teacher
                     FROM class_master cm
                     JOIN school_master sm ON sm.school_id = cm.school_id
                     ORDER BY sm.school_name, cm.class, cm.section
                     """,
                     conn,
+                    params=(CURRENT_ACADEMIC_YEAR,),
                 ),
                 use_container_width=True,
             )
@@ -558,6 +721,23 @@ def _admin_panel():
 
     with tab4:
         st.markdown("**Student Master**")
+        st.markdown(f"Academic year in DB defaults to `{CURRENT_ACADEMIC_YEAR}`.")
+
+        st.markdown("**Bulk upload (CSV)**")
+        st.markdown("Upload a CSV with columns: `school,class,section,student` (optional `roll_no`).")
+        s_file = st.file_uploader("Upload Students CSV", type=["csv"], key="students_csv")
+        if s_file:
+            try:
+                s_df = pd.read_csv(s_file)
+                st.dataframe(s_df.head(50), use_container_width=True)
+                if st.button("Import Students CSV"):
+                    ins, upd = _import_students_csv(s_df)
+                    st.success(f"Imported. Inserted: {ins}, Updated roll_no: {upd}")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Import failed: {e}")
+
+        st.divider()
         classes = pd.read_sql(
             """
             SELECT cm.class_id, sm.school_name, cm.class, cm.section
@@ -589,19 +769,22 @@ def _admin_panel():
             st.dataframe(
                 pd.read_sql(
                     """
-                    SELECT stm.student_id, sm.school_name, cm.class, cm.section, stm.student, stm.roll_no
+                    SELECT stm.student_id, sm.school_name, cm.class, cm.section, stm.student, stm.roll_no,
+                           COALESCE(stm.academic_year, ?) AS academic_year
                     FROM student_master stm
                     JOIN class_master cm ON cm.class_id = stm.class_id
                     JOIN school_master sm ON sm.school_id = cm.school_id
                     ORDER BY sm.school_name, cm.class, cm.section, stm.student
                     """,
                     conn,
+                    params=(CURRENT_ACADEMIC_YEAR,),
                 ),
                 use_container_width=True,
             )
 
     with tab5:
         st.markdown("**Exam Master**")
+        st.markdown(f"Academic year in DB defaults to `{CURRENT_ACADEMIC_YEAR}`.")
         schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
         if schools.empty:
             st.warning("Create a school first.")
@@ -623,12 +806,14 @@ def _admin_panel():
             st.dataframe(
                 pd.read_sql(
                     """
-                    SELECT em.exam_id, sm.school_name, em.exam
+                    SELECT em.exam_id, sm.school_name, em.exam,
+                           COALESCE(em.academic_year, ?) AS academic_year
                     FROM exam_master em
                     JOIN school_master sm ON sm.school_id = em.school_id
                     ORDER BY sm.school_name, em.exam
                     """,
                     conn,
+                    params=(CURRENT_ACADEMIC_YEAR,),
                 ),
                 use_container_width=True,
             )
