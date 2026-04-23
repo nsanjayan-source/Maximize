@@ -760,6 +760,128 @@ def _import_marks_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
     return inserted, updated
 
 
+def _import_student_master_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
+    """
+    Expected columns:
+      student_name
+
+    Optional columns:
+      student_id (to update existing records by ID)
+      father_name, mother_name, father_contact, mother_contact, address
+
+    Behavior:
+    - If `student_id` is present and exists: UPDATE that row.
+    - Else: INSERT a new row (or IGNORE if it violates the UNIQUE constraint).
+    """
+    if "student_name" not in csv_df.columns:
+        raise ValueError("Missing columns: student_name")
+
+    df_in = csv_df.copy()
+
+    optional_cols = ["father_name", "mother_name", "father_contact", "mother_contact", "address"]
+    for c in ["student_name"] + optional_cols:
+        if c in df_in.columns:
+            df_in[c] = df_in[c].apply(lambda v: None if _normalize_str(v) == "" else _normalize_str(v))
+
+    has_student_id = "student_id" in df_in.columns
+    if has_student_id:
+        df_in["student_id"] = pd.to_numeric(df_in["student_id"], errors="coerce")
+
+    df_in = df_in[df_in["student_name"].notna()].copy()
+
+    inserted = 0
+    updated = 0
+
+    cur = conn.cursor()
+    cur.execute("BEGIN")
+    try:
+        for row in df_in.itertuples(index=False):
+            student_name = getattr(row, "student_name")
+            father_name = getattr(row, "father_name") if hasattr(row, "father_name") else None
+            mother_name = getattr(row, "mother_name") if hasattr(row, "mother_name") else None
+            father_contact = getattr(row, "father_contact") if hasattr(row, "father_contact") else None
+            mother_contact = getattr(row, "mother_contact") if hasattr(row, "mother_contact") else None
+            address = getattr(row, "address") if hasattr(row, "address") else None
+
+            student_id_val = None
+            if has_student_id:
+                sid = getattr(row, "student_id")
+                if sid is not None and not (isinstance(sid, float) and np.isnan(sid)):
+                    student_id_val = int(sid)
+
+            if student_id_val is not None:
+                cur.execute("SELECT 1 FROM student_master WHERE student_id=?", (student_id_val,))
+                if cur.fetchone():
+                    cur.execute(
+                        """
+                        UPDATE student_master
+                        SET student_name = COALESCE(?, student_name),
+                            father_name = ?,
+                            mother_name = ?,
+                            father_contact = ?,
+                            mother_contact = ?,
+                            address = ?
+                        WHERE student_id = ?
+                        """,
+                        (
+                            _normalize_str(student_name) or None,
+                            father_name,
+                            mother_name,
+                            father_contact,
+                            mother_contact,
+                            address,
+                            student_id_val,
+                        ),
+                    )
+                    updated += 1
+                    continue
+
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO student_master
+                        (student_id, student_name, father_name, mother_name, father_contact, mother_contact, address)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        student_id_val,
+                        _normalize_str(student_name),
+                        father_name,
+                        mother_name,
+                        father_contact,
+                        mother_contact,
+                        address,
+                    ),
+                )
+                if cur.rowcount:
+                    inserted += 1
+                continue
+
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO student_master
+                    (student_name, father_name, mother_name, father_contact, mother_contact, address)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _normalize_str(student_name),
+                    father_name,
+                    mother_name,
+                    father_contact,
+                    mother_contact,
+                    address,
+                ),
+            )
+            if cur.rowcount:
+                inserted += 1
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return inserted, updated
+
+
 def _admin_panel():
     st.subheader("Admin Panel")
 
@@ -768,10 +890,10 @@ def _admin_panel():
             "Schools",
             "Classes",
             "Subjects",
-            "Student Class",
-            "Student Master",
             "Teachers",
             "Teacher-Class-Subject",
+            "Student",
+            "Student Class",
             "Exams",
             "Marks (CSV / Manual)",
         ]
@@ -865,48 +987,21 @@ def _admin_panel():
             )
 
     with tab4:
-        st.markdown("**Student Class**")
-        st.markdown(f"Academic year in DB defaults to `{CURRENT_ACADEMIC_YEAR}`.")
-
-        st.markdown("**Bulk upload (CSV)**")
-        st.markdown("Upload a CSV with columns: `school,class,section,student` (optional `roll_no`).")
-        s_file = st.file_uploader("Upload Students CSV", type=["csv"], key="students_csv")
-        if s_file:
-            try:
-                s_df = pd.read_csv(s_file)
-                st.dataframe(s_df.head(50), use_container_width=True)
-                if st.button("Import Students CSV"):
-                    ins, upd = _import_students_csv(s_df)
-                    st.success(f"Imported. Inserted: {ins}, Updated roll_no: {upd}")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Import failed: {e}")
-
-        st.divider()
-        classes = pd.read_sql(
-            """
-            SELECT cm.class_id, sm.school_name, cm.class, cm.section
-            FROM class_master cm
-            JOIN school_master sm ON sm.school_id = cm.school_id
-            ORDER BY sm.school_name, cm.class, cm.section
-            """,
-            conn,
-        )
-        if classes.empty:
-            st.warning("Create class-sections first.")
+        st.markdown("**Teacher Master**")
+        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
+        if schools.empty:
+            st.warning("Create a school first.")
         else:
-            class_label = classes.apply(lambda r: f"{r['school_name']} | {r['class']}{r['section']}", axis=1).tolist()
-            selected = st.selectbox("Class-Section", class_label, key="stu_class")
-            class_id = int(classes.iloc[class_label.index(selected)]["class_id"])
-            with st.form("add_student"):
-                student = st.text_input("Student Name")
-                roll_no = st.text_input("Roll No (optional)")
-                submitted = st.form_submit_button("Add / Save Student")
+            school_name = st.selectbox("School", schools["school_name"].tolist(), key="t_school")
+            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
+            with st.form("add_teacher"):
+                teacher_name = st.text_input("Teacher Name")
+                submitted = st.form_submit_button("Add / Save Teacher")
                 if submitted:
-                    if _normalize_str(student) == "":
-                        st.error("Student name is required.")
+                    if _normalize_str(teacher_name) == "":
+                        st.error("Teacher name is required.")
                     else:
-                        _get_or_create_student(cur, class_id, student, roll_no=roll_no)
+                        _get_or_create_teacher(cur, school_id, teacher_name)
                         conn.commit()
                         st.success("Saved.")
                         st.rerun()
@@ -914,22 +1009,101 @@ def _admin_panel():
             st.dataframe(
                 pd.read_sql(
                     """
-                    SELECT stm.student_id, sm.school_name, cm.class, cm.section, stm.student, stm.roll_no,
-                           COALESCE(stm.academic_year, ?) AS academic_year
-                    FROM student_class stm
-                    JOIN class_master cm ON cm.class_id = stm.class_id
-                    JOIN school_master sm ON sm.school_id = cm.school_id
-                    ORDER BY sm.school_name, cm.class, cm.section, stm.student
+                    SELECT tm.teacher_id, sm.school_name, tm.teacher_name
+                    FROM teacher_master tm
+                    JOIN school_master sm ON sm.school_id = tm.school_id
+                    ORDER BY sm.school_name, tm.teacher_name
                     """,
                     conn,
-                    params=(CURRENT_ACADEMIC_YEAR,),
                 ),
                 use_container_width=True,
             )
 
     with tab5:
+        st.markdown("**Teacher Class Master (Teacher → Class-Section → Subject)**")
+        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
+        if schools.empty:
+            st.warning("Create a school first.")
+        else:
+            school_name = st.selectbox("School", schools["school_name"].tolist(), key="tcs_school")
+            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
+
+            teachers = pd.read_sql(
+                "SELECT teacher_id, teacher_name FROM teacher_master WHERE school_id=? ORDER BY teacher_name",
+                conn,
+                params=(school_id,),
+            )
+            classes = pd.read_sql(
+                "SELECT class_id, class, section FROM class_master WHERE school_id=? ORDER BY class, section",
+                conn,
+                params=(school_id,),
+            )
+            subjects = pd.read_sql(
+                "SELECT subject_id, subject FROM subject_master WHERE school_id=? ORDER BY subject",
+                conn,
+                params=(school_id,),
+            )
+
+            if teachers.empty or classes.empty or subjects.empty:
+                st.warning("Create teachers, class-sections, and subjects first.")
+            else:
+                teacher_name = st.selectbox("Teacher", teachers["teacher_name"].tolist(), key="tcs_teacher")
+                teacher_id = int(teachers[teachers["teacher_name"] == teacher_name]["teacher_id"].iloc[0])
+
+                class_section_label = classes.apply(lambda r: f"{r['class']}{r['section']}", axis=1).tolist()
+                chosen_class_section = st.selectbox("Class-Section", class_section_label, key="tcs_class")
+                class_id = int(classes.iloc[class_section_label.index(chosen_class_section)]["class_id"])
+
+                subject_name = st.selectbox("Subject", subjects["subject"].tolist(), key="tcs_subject")
+                subject_id = int(subjects[subjects["subject"] == subject_name]["subject_id"].iloc[0])
+
+                if st.button("Add / Save Teacher-Class-Subject"):
+                    _get_or_create_teacher_class_sub(cur, teacher_id, class_id, subject_id)
+                    conn.commit()
+                    st.success("Saved.")
+                    st.rerun()
+
+            st.dataframe(
+                pd.read_sql(
+                    """
+                    SELECT
+                        tcs.teacher_class_sub_id,
+                        sm.school_name,
+                        tm.teacher_name,
+                        cm.class,
+                        cm.section,
+                        subm.subject
+                    FROM teacher_class_sub tcs
+                    JOIN teacher_master tm ON tm.teacher_id = tcs.teacher_id
+                    JOIN class_master cm ON cm.class_id = tcs.class_id
+                    JOIN subject_master subm ON subm.subject_id = tcs.subject_id
+                    JOIN school_master sm ON sm.school_id = tm.school_id
+                    ORDER BY sm.school_name, tm.teacher_name, cm.class, cm.section, subm.subject
+                    """,
+                    conn,
+                ),
+                use_container_width=True,
+            )
+
+    with tab6:
         st.markdown("**Student Master (Personal Details)**")
         st.markdown("Create / update a student profile. Class assignment happens under **Student Class**.")
+
+        st.markdown("**Bulk upload (CSV)**")
+        st.markdown(
+            "Upload a CSV with column: `student_name` (optional: `student_id,father_name,mother_name,father_contact,mother_contact,address`)."
+        )
+        sm_file = st.file_uploader("Upload Student Master CSV", type=["csv"], key="student_master_csv")
+        if sm_file:
+            try:
+                sm_df = pd.read_csv(sm_file)
+                st.dataframe(sm_df.head(50), use_container_width=True)
+                if st.button("Import Student Master CSV"):
+                    ins, upd = _import_student_master_csv(sm_df)
+                    st.success(f"Imported. Inserted: {ins}, Updated: {upd}")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Import failed: {e}")
 
         students = pd.read_sql(
             "SELECT student_id, student_name FROM student_master ORDER BY student_name, student_id",
@@ -1035,22 +1209,49 @@ def _admin_panel():
             use_container_width=True,
         )
 
-    with tab6:
-        st.markdown("**Teacher Master**")
-        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
-        if schools.empty:
-            st.warning("Create a school first.")
+    with tab7:
+        st.markdown("**Student Class**")
+        st.markdown(f"Academic year in DB defaults to `{CURRENT_ACADEMIC_YEAR}`.")
+
+        st.markdown("**Bulk upload (CSV)**")
+        st.markdown("Upload a CSV with columns: `school,class,section,student` (optional `roll_no`).")
+        s_file = st.file_uploader("Upload Students CSV", type=["csv"], key="students_csv")
+        if s_file:
+            try:
+                s_df = pd.read_csv(s_file)
+                st.dataframe(s_df.head(50), use_container_width=True)
+                if st.button("Import Students CSV"):
+                    ins, upd = _import_students_csv(s_df)
+                    st.success(f"Imported. Inserted: {ins}, Updated roll_no: {upd}")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Import failed: {e}")
+
+        st.divider()
+        classes = pd.read_sql(
+            """
+            SELECT cm.class_id, sm.school_name, cm.class, cm.section
+            FROM class_master cm
+            JOIN school_master sm ON sm.school_id = cm.school_id
+            ORDER BY sm.school_name, cm.class, cm.section
+            """,
+            conn,
+        )
+        if classes.empty:
+            st.warning("Create class-sections first.")
         else:
-            school_name = st.selectbox("School", schools["school_name"].tolist(), key="t_school")
-            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
-            with st.form("add_teacher"):
-                teacher_name = st.text_input("Teacher Name")
-                submitted = st.form_submit_button("Add / Save Teacher")
+            class_label = classes.apply(lambda r: f"{r['school_name']} | {r['class']}{r['section']}", axis=1).tolist()
+            selected = st.selectbox("Class-Section", class_label, key="stu_class")
+            class_id = int(classes.iloc[class_label.index(selected)]["class_id"])
+            with st.form("add_student"):
+                student = st.text_input("Student Name")
+                roll_no = st.text_input("Roll No (optional)")
+                submitted = st.form_submit_button("Add / Save Student")
                 if submitted:
-                    if _normalize_str(teacher_name) == "":
-                        st.error("Teacher name is required.")
+                    if _normalize_str(student) == "":
+                        st.error("Student name is required.")
                     else:
-                        _get_or_create_teacher(cur, school_id, teacher_name)
+                        _get_or_create_student(cur, class_id, student, roll_no=roll_no)
                         conn.commit()
                         st.success("Saved.")
                         st.rerun()
@@ -1058,78 +1259,15 @@ def _admin_panel():
             st.dataframe(
                 pd.read_sql(
                     """
-                    SELECT tm.teacher_id, sm.school_name, tm.teacher_name
-                    FROM teacher_master tm
-                    JOIN school_master sm ON sm.school_id = tm.school_id
-                    ORDER BY sm.school_name, tm.teacher_name
+                    SELECT stm.student_id, sm.school_name, cm.class, cm.section, stm.student, stm.roll_no,
+                           COALESCE(stm.academic_year, ?) AS academic_year
+                    FROM student_class stm
+                    JOIN class_master cm ON cm.class_id = stm.class_id
+                    JOIN school_master sm ON sm.school_id = cm.school_id
+                    ORDER BY sm.school_name, cm.class, cm.section, stm.student
                     """,
                     conn,
-                ),
-                use_container_width=True,
-            )
-
-    with tab7:
-        st.markdown("**Teacher Class Master (Teacher → Class-Section → Subject)**")
-        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
-        if schools.empty:
-            st.warning("Create a school first.")
-        else:
-            school_name = st.selectbox("School", schools["school_name"].tolist(), key="tcs_school")
-            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
-
-            teachers = pd.read_sql(
-                "SELECT teacher_id, teacher_name FROM teacher_master WHERE school_id=? ORDER BY teacher_name",
-                conn,
-                params=(school_id,),
-            )
-            classes = pd.read_sql(
-                "SELECT class_id, class, section FROM class_master WHERE school_id=? ORDER BY class, section",
-                conn,
-                params=(school_id,),
-            )
-            subjects = pd.read_sql(
-                "SELECT subject_id, subject FROM subject_master WHERE school_id=? ORDER BY subject",
-                conn,
-                params=(school_id,),
-            )
-
-            if teachers.empty or classes.empty or subjects.empty:
-                st.warning("Create teachers, class-sections, and subjects first.")
-            else:
-                teacher_name = st.selectbox("Teacher", teachers["teacher_name"].tolist(), key="tcs_teacher")
-                teacher_id = int(teachers[teachers["teacher_name"] == teacher_name]["teacher_id"].iloc[0])
-
-                class_section_label = classes.apply(lambda r: f"{r['class']}{r['section']}", axis=1).tolist()
-                chosen_class_section = st.selectbox("Class-Section", class_section_label, key="tcs_class")
-                class_id = int(classes.iloc[class_section_label.index(chosen_class_section)]["class_id"])
-
-                subject_name = st.selectbox("Subject", subjects["subject"].tolist(), key="tcs_subject")
-                subject_id = int(subjects[subjects["subject"] == subject_name]["subject_id"].iloc[0])
-
-                if st.button("Add / Save Teacher-Class-Subject"):
-                    _get_or_create_teacher_class_sub(cur, teacher_id, class_id, subject_id)
-                    conn.commit()
-                    st.success("Saved.")
-                    st.rerun()
-
-            st.dataframe(
-                pd.read_sql(
-                    """
-                    SELECT
-                        tcs.teacher_class_sub_id,
-                        sm.school_name,
-                        tm.teacher_name,
-                        cm.class,
-                        cm.section,
-                        subm.subject
-                    FROM teacher_class_sub tcs
-                    JOIN teacher_master tm ON tm.teacher_id = tcs.teacher_id
-                    JOIN class_master cm ON cm.class_id = tcs.class_id
-                    JOIN subject_master subm ON subm.subject_id = tcs.subject_id
-                    JOIN school_master sm ON sm.school_id = tm.school_id
-                    ORDER BY sm.school_name, tm.teacher_name, cm.class, cm.section, subm.subject
-                    """,
-                    conn,
+                    params=(CURRENT_ACADEMIC_YEAR,),
                 ),
                 use_container_width=True,
             )
