@@ -281,12 +281,32 @@ def _get_or_create_school(cur: sqlite3.Cursor, school_name: str) -> int:
     return int(cur.fetchone()[0])
 
 
-def _get_or_create_class(cur: sqlite3.Cursor, school_id: int, cls: str, section: str) -> int:
+def _get_or_create_class(
+    cur: sqlite3.Cursor,
+    school_id: int,
+    cls: str,
+    section: str,
+    academic_year: Optional[str] = None,
+    class_teacher_id: Optional[int] = None,
+) -> int:
     cls = str(cls).strip()
     section = str(section).strip()
+    academic_year = CURRENT_ACADEMIC_YEAR if _normalize_str(academic_year or "") == "" else str(academic_year).strip()
     cur.execute(
-        "INSERT OR IGNORE INTO class_master (school_id, class, section) VALUES (?, ?, ?)",
-        (school_id, cls, section),
+        """
+        INSERT OR IGNORE INTO class_master (school_id, class, section, Academic_Year, class_teacher)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (school_id, cls, section, academic_year, class_teacher_id),
+    )
+    # If the class-section already exists, treat "Add / Save" as an update for year/teacher.
+    cur.execute(
+        """
+        UPDATE class_master
+        SET Academic_Year = ?, class_teacher = ?
+        WHERE school_id = ? AND class = ? AND section = ?
+        """,
+        (academic_year, class_teacher_id, school_id, cls, section),
     )
     cur.execute(
         "SELECT class_id FROM class_master WHERE school_id=? AND class=? AND section=?",
@@ -888,14 +908,14 @@ def _admin_panel():
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
         [
             "Schools",
-            "Classes",
-            "Subjects",
             "Teachers",
+            "Class",
+            "Subject",
             "Teacher-Class-Subject",
             "Student",
             "Student Class",
             "Exams",
-            "Marks (CSV / Manual)",
+            "Mark",
         ]
     )
 
@@ -917,76 +937,6 @@ def _admin_panel():
         st.dataframe(pd.read_sql("SELECT * FROM school_master ORDER BY school_name", conn), use_container_width=True)
 
     with tab2:
-        st.markdown("**Class Master (Class + Section)**")
-        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
-        if schools.empty:
-            st.warning("Create a school first.")
-        else:
-            school_name = st.selectbox("School", schools["school_name"].tolist(), key="cls_school")
-            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
-            with st.form("add_class"):
-                cls = st.text_input("Class (e.g., 8, IX, Grade 10)")
-                section = st.text_input("Section (e.g., A, B)")
-                submitted = st.form_submit_button("Add / Save Class-Section")
-                if submitted:
-                    if _normalize_str(cls) == "" or _normalize_str(section) == "":
-                        st.error("Class and Section are required.")
-                    else:
-                        _get_or_create_class(cur, school_id, cls, section)
-                        conn.commit()
-                        st.success("Saved.")
-                        st.rerun()
-
-            st.dataframe(
-                pd.read_sql(
-                    """
-                    SELECT cm.class_id, sm.school_name, cm.class, cm.section,
-                           COALESCE(cm.Academic_Year, ?) AS Academic_Year,
-                           cm.class_teacher
-                    FROM class_master cm
-                    JOIN school_master sm ON sm.school_id = cm.school_id
-                    ORDER BY sm.school_name, cm.class, cm.section
-                    """,
-                    conn,
-                    params=(CURRENT_ACADEMIC_YEAR,),
-                ),
-                use_container_width=True,
-            )
-
-    with tab3:
-        st.markdown("**Subject Master**")
-        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
-        if schools.empty:
-            st.warning("Create a school first.")
-        else:
-            school_name = st.selectbox("School", schools["school_name"].tolist(), key="sub_school")
-            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
-            with st.form("add_subject"):
-                subject = st.text_input("Subject (e.g., Math, Science)")
-                submitted = st.form_submit_button("Add / Save Subject")
-                if submitted:
-                    if _normalize_str(subject) == "":
-                        st.error("Subject is required.")
-                    else:
-                        _get_or_create_subject(cur, school_id, subject)
-                        conn.commit()
-                        st.success("Saved.")
-                        st.rerun()
-
-            st.dataframe(
-                pd.read_sql(
-                    """
-                    SELECT subm.subject_id, sm.school_name, subm.subject
-                    FROM subject_master subm
-                    JOIN school_master sm ON sm.school_id = subm.school_id
-                    ORDER BY sm.school_name, subm.subject
-                    """,
-                    conn,
-                ),
-                use_container_width=True,
-            )
-
-    with tab4:
         st.markdown("**Teacher Master**")
         schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
         if schools.empty:
@@ -1013,6 +963,90 @@ def _admin_panel():
                     FROM teacher_master tm
                     JOIN school_master sm ON sm.school_id = tm.school_id
                     ORDER BY sm.school_name, tm.teacher_name
+                    """,
+                    conn,
+                ),
+                use_container_width=True,
+            )
+
+    with tab3:
+        st.markdown("**Class Master (Class + Section)**")
+        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
+        if schools.empty:
+            st.warning("Create a school first.")
+        else:
+            school_name = st.selectbox("School", schools["school_name"].tolist(), key="cls_school")
+            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
+
+            teachers = pd.read_sql(
+                "SELECT teacher_id, teacher_name FROM teacher_master WHERE school_id=? ORDER BY teacher_name",
+                conn,
+                params=(school_id,),
+            )
+            teacher_options = ["(None)"] + (teachers["teacher_name"].tolist() if not teachers.empty else [])
+            with st.form("add_class"):
+                cls = st.text_input("Class (e.g., 8, IX, Grade 10)")
+                section = st.text_input("Section (e.g., A, B)")
+                academic_year = st.text_input("Academic Year", value=CURRENT_ACADEMIC_YEAR)
+                class_teacher_name = st.selectbox("Class Teacher", teacher_options)
+                submitted = st.form_submit_button("Add / Save Class-Section")
+                if submitted:
+                    if _normalize_str(cls) == "" or _normalize_str(section) == "":
+                        st.error("Class and Section are required.")
+                    else:
+                        class_teacher_id = None
+                        if class_teacher_name != "(None)" and not teachers.empty:
+                            class_teacher_id = int(
+                                teachers.loc[teachers["teacher_name"] == class_teacher_name, "teacher_id"].iloc[0]
+                            )
+                        _get_or_create_class(cur, school_id, cls, section, academic_year, class_teacher_id)
+                        conn.commit()
+                        st.success("Saved.")
+                        st.rerun()
+
+            st.dataframe(
+                pd.read_sql(
+                    """
+                    SELECT cm.class_id, sm.school_name, cm.class, cm.section,
+                           COALESCE(cm.Academic_Year, ?) AS Academic_Year,
+                           cm.class_teacher
+                    FROM class_master cm
+                    JOIN school_master sm ON sm.school_id = cm.school_id
+                    ORDER BY sm.school_name, cm.class, cm.section
+                    """,
+                    conn,
+                    params=(CURRENT_ACADEMIC_YEAR,),
+                ),
+                use_container_width=True,
+            )
+
+    with tab4:
+        st.markdown("**Subject Master**")
+        schools = pd.read_sql("SELECT school_id, school_name FROM school_master ORDER BY school_name", conn)
+        if schools.empty:
+            st.warning("Create a school first.")
+        else:
+            school_name = st.selectbox("School", schools["school_name"].tolist(), key="sub_school")
+            school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
+            with st.form("add_subject"):
+                subject = st.text_input("Subject (e.g., Math, Science)")
+                submitted = st.form_submit_button("Add / Save Subject")
+                if submitted:
+                    if _normalize_str(subject) == "":
+                        st.error("Subject is required.")
+                    else:
+                        _get_or_create_subject(cur, school_id, subject)
+                        conn.commit()
+                        st.success("Saved.")
+                        st.rerun()
+
+            st.dataframe(
+                pd.read_sql(
+                    """
+                    SELECT subm.subject_id, sm.school_name, subm.subject
+                    FROM subject_master subm
+                    JOIN school_master sm ON sm.school_id = subm.school_id
+                    ORDER BY sm.school_name, subm.subject
                     """,
                     conn,
                 ),
