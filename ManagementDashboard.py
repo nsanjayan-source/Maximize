@@ -346,18 +346,19 @@ def _get_or_create_subject(cur: sqlite3.Cursor, school_id: int, subject: str) ->
     return int(cur.fetchone()[0])
 
 
-def _get_or_create_exam(cur: sqlite3.Cursor, school_id: int, exam: str) -> int:
+def _get_or_create_exam(cur: sqlite3.Cursor, school_id: int, exam: str, academic_year: Optional[str] = None) -> int:
     exam = str(exam).strip()
+    academic_year = CURRENT_ACADEMIC_YEAR if _normalize_str(academic_year or "") == "" else str(academic_year).strip()
     # Backwards-compatible insert for older DBs (but we migrate first on startup)
     if _table_has_column("exam_master", "academic_year") and _table_has_column("exam_master", "start_date") and _table_has_column("exam_master", "end_date"):
         cur.execute(
             "INSERT OR IGNORE INTO exam_master (school_id, exam, academic_year, start_date, end_date) VALUES (?, ?, ?, NULL, NULL)",
-            (school_id, exam, CURRENT_ACADEMIC_YEAR),
+            (school_id, exam, academic_year),
         )
     elif _table_has_column("exam_master", "academic_year"):
         cur.execute(
             "INSERT OR IGNORE INTO exam_master (school_id, exam, academic_year) VALUES (?, ?, ?)",
-            (school_id, exam, CURRENT_ACADEMIC_YEAR),
+            (school_id, exam, academic_year),
         )
     else:
         cur.execute(
@@ -1378,17 +1379,36 @@ def _admin_panel():
         else:
             school_name = st.selectbox("School", schools["school_name"].tolist(), key="exam_school")
             school_id = int(schools[schools["school_name"] == school_name]["school_id"].iloc[0])
+
+            # Keep this outside the form so enabling/disabling dates works immediately.
+            use_dates = st.checkbox("Set start/end dates", value=False, key="exam_use_dates")
+
             with st.form("add_exam"):
                 exam = st.text_input("Exam (e.g., Midterm, Unit Test 1)")
-                use_dates = st.checkbox("Set start/end dates", value=False)
-                start_date = st.date_input("Start Date", value=dt.date.today(), disabled=(not use_dates))
-                end_date = st.date_input("End Date", value=dt.date.today(), disabled=(not use_dates))
+                academic_year = st.text_input("Academic Year", value=CURRENT_ACADEMIC_YEAR)
+                start_date = st.date_input(
+                    "Start Date",
+                    value=dt.date.today(),
+                    disabled=(not st.session_state.get("exam_use_dates", False)),
+                )
+                end_date = st.date_input(
+                    "End Date",
+                    value=dt.date.today(),
+                    disabled=(not st.session_state.get("exam_use_dates", False)),
+                )
                 submitted = st.form_submit_button("Add / Save Exam")
                 if submitted:
                     if _normalize_str(exam) == "":
                         st.error("Exam is required.")
                     else:
-                        exam_id = _get_or_create_exam(cur, school_id, exam)
+                        exam_id = _get_or_create_exam(cur, school_id, exam, academic_year=academic_year)
+
+                        if _table_has_column("exam_master", "academic_year"):
+                            cur.execute(
+                                "UPDATE exam_master SET academic_year=? WHERE exam_id=?",
+                                (str(academic_year).strip(), exam_id),
+                            )
+
                         if use_dates and _table_has_column("exam_master", "start_date") and _table_has_column("exam_master", "end_date"):
                             cur.execute(
                                 """
