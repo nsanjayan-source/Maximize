@@ -1917,8 +1917,7 @@ if st.session_state.level == "student":
             exams = exam_order["exam"].tolist()
 
             for i, exam in enumerate(exams):
-                #with st.expander(f"📘 Exam: {exam}", expanded=(i == 0)):
-                with st.expander(f"📘 {exam} ({date.strftime('%d %b %Y')})"):
+                with st.expander(f"📘 Exam: {exam}", expanded=(i == 0)):
                     edf = stf[stf["exam"] == exam]
 
                     # Tabs for mobile-friendly layout
