@@ -1009,9 +1009,10 @@ def _admin_panel():
                     """
                     SELECT cm.class_id, sm.school_name, cm.class, cm.section,
                            COALESCE(cm.Academic_Year, ?) AS Academic_Year,
-                           cm.class_teacher
+                           COALESCE(tm.teacher_name, '') AS class_teacher
                     FROM class_master cm
                     JOIN school_master sm ON sm.school_id = cm.school_id
+                    LEFT JOIN teacher_master tm ON tm.teacher_id = cm.class_teacher
                     ORDER BY sm.school_name, cm.class, cm.section
                     """,
                     conn,
