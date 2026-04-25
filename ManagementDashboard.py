@@ -179,64 +179,64 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
     """)
 
 
-def _migrate_student_class_pk_and_marks(cur: sqlite3.Cursor) -> None:
-    """
-    Migrate older DBs to:
-    - student_class(student_class_id PK, student_id FK, class_id, ...)
-    - marks(student_class_id FK, exam_id, subject_id, marks)
-    """
-    if _table_exists("student_class") and not _table_has_column("student_class", "student_class_id"):
-        cur.execute("ALTER TABLE student_class RENAME TO student_class_old_no_pk")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS student_class (
-                student_class_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                student_id INTEGER NOT NULL,
-                class_id INTEGER NOT NULL,
-                student TEXT NOT NULL,
-                roll_no TEXT,
-                academic_year TEXT NOT NULL DEFAULT '2025-2026',
-                UNIQUE (student_id, class_id, academic_year),
-                FOREIGN KEY (class_id) REFERENCES class_master(class_id) ON DELETE CASCADE,
-                FOREIGN KEY (student_id) REFERENCES student_master(student_id) ON DELETE CASCADE
-            )
-        """)
-        # Preserve existing mappings; academic_year may be missing in older DBs.
-        if _table_has_column("student_class_old_no_pk", "academic_year"):
-            cur.execute("""
-                INSERT INTO student_class (student_id, class_id, student, roll_no, academic_year)
-                SELECT student_id, class_id, student, roll_no, COALESCE(academic_year, '2025-2026')
-                FROM student_class_old_no_pk
-            """)
-        else:
-            cur.execute("""
-                INSERT INTO student_class (student_id, class_id, student, roll_no, academic_year)
-                SELECT student_id, class_id, student, roll_no, '2025-2026'
-                FROM student_class_old_no_pk
-            """)
+# def _migrate_student_class_pk_and_marks(cur: sqlite3.Cursor) -> None:
+#     """
+#     Migrate older DBs to:
+#     - student_class(student_class_id PK, student_id FK, class_id, ...)
+#     - marks(student_class_id FK, exam_id, subject_id, marks)
+#     """
+#     if _table_exists("student_class") and not _table_has_column("student_class", "student_class_id"):
+#         cur.execute("ALTER TABLE student_class RENAME TO student_class_old_no_pk")
+#         cur.execute("""
+#             CREATE TABLE IF NOT EXISTS student_class (
+#                 student_class_id INTEGER PRIMARY KEY AUTOINCREMENT,
+#                 student_id INTEGER NOT NULL,
+#                 class_id INTEGER NOT NULL,
+#                 student TEXT NOT NULL,
+#                 roll_no TEXT,
+#                 academic_year TEXT NOT NULL DEFAULT '2025-2026',
+#                 UNIQUE (student_id, class_id, academic_year),
+#                 FOREIGN KEY (class_id) REFERENCES class_master(class_id) ON DELETE CASCADE,
+#                 FOREIGN KEY (student_id) REFERENCES student_master(student_id) ON DELETE CASCADE
+#             )
+#         """)
+#         # Preserve existing mappings; academic_year may be missing in older DBs.
+#         if _table_has_column("student_class_old_no_pk", "academic_year"):
+#             cur.execute("""
+#                 INSERT INTO student_class (student_id, class_id, student, roll_no, academic_year)
+#                 SELECT student_id, class_id, student, roll_no, COALESCE(academic_year, '2025-2026')
+#                 FROM student_class_old_no_pk
+#             """)
+#         else:
+#             cur.execute("""
+#                 INSERT INTO student_class (student_id, class_id, student, roll_no, academic_year)
+#                 SELECT student_id, class_id, student, roll_no, '2025-2026'
+#                 FROM student_class_old_no_pk
+#             """)
 
-    # Migrate marks if it still stores student_id.
-    if _table_exists("marks") and _table_has_column("marks", "student_id") and not _table_has_column("marks", "student_class_id"):
-        cur.execute("ALTER TABLE marks RENAME TO marks_old_student_id")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS marks (
-                marks_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                student_class_id INTEGER NOT NULL,
-                subject_id INTEGER NOT NULL,
-                exam_id INTEGER NOT NULL,
-                marks INTEGER NOT NULL,
-                UNIQUE (student_class_id, subject_id, exam_id),
-                FOREIGN KEY (student_class_id) REFERENCES student_class(student_class_id) ON DELETE CASCADE,
-                FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE,
-                FOREIGN KEY (exam_id) REFERENCES exam_master(exam_id) ON DELETE CASCADE
-            )
-        """)
-        # Old schemas had one student_class row per student_id, so this join is stable.
-        cur.execute("""
-            INSERT INTO marks (marks_id, student_class_id, subject_id, exam_id, marks)
-            SELECT m.marks_id, sc.student_class_id, m.subject_id, m.exam_id, m.marks
-            FROM marks_old_student_id m
-            JOIN student_class sc ON sc.student_id = m.student_id
-        """)
+#     # Migrate marks if it still stores student_id.
+#     if _table_exists("marks") and _table_has_column("marks", "student_id") and not _table_has_column("marks", "student_class_id"):
+#         cur.execute("ALTER TABLE marks RENAME TO marks_old_student_id")
+#         cur.execute("""
+#             CREATE TABLE IF NOT EXISTS marks (
+#                 marks_id INTEGER PRIMARY KEY AUTOINCREMENT,
+#                 student_class_id INTEGER NOT NULL,
+#                 subject_id INTEGER NOT NULL,
+#                 exam_id INTEGER NOT NULL,
+#                 marks INTEGER NOT NULL,
+#                 UNIQUE (student_class_id, subject_id, exam_id),
+#                 FOREIGN KEY (student_class_id) REFERENCES student_class(student_class_id) ON DELETE CASCADE,
+#                 FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE,
+#                 FOREIGN KEY (exam_id) REFERENCES exam_master(exam_id) ON DELETE CASCADE
+#             )
+#         """)
+#         # Old schemas had one student_class row per student_id, so this join is stable.
+#         cur.execute("""
+#             INSERT INTO marks (marks_id, student_class_id, subject_id, exam_id, marks)
+#             SELECT m.marks_id, sc.student_class_id, m.subject_id, m.exam_id, m.marks
+#             FROM marks_old_student_id m
+#             JOIN student_class sc ON sc.student_id = m.student_id
+#         """)
 
 
 def _migrate_schema_additions(cur: sqlite3.Cursor) -> None:
@@ -620,7 +620,7 @@ def init_db():
     _migrate_student_master_and_links(cur)
 
     # Introduce student_class_id PK and re-key marks.
-    _migrate_student_class_pk_and_marks(cur)
+    #_migrate_student_class_pk_and_marks(cur)
 
     # Insert default users if not exists
     users = [
