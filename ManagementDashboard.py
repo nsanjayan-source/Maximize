@@ -726,25 +726,29 @@ def load_data():
     # Joined "reporting" dataframe to keep the rest of the app working
     return pd.read_sql(
         """
-        SELECT
+        SELECT 
             sm.school_name AS school,
-            cm.class AS class,
-            cm.section AS section,
-            COALESCE(smm.student_name, stm.student) AS student,
-            subm.subject AS subject,
-            em.exam AS exam,
-            m.marks AS marks
+            cm.class,
+            cm.section,
+            stm.student,
+            sub.subject,
+            em.exam,
+            em.start_date,
+            em.end_date,
+            m.marks
         FROM marks m
         JOIN student_class stm ON stm.student_class_id = m.student_class_id
-        JOIN student_master smm ON smm.student_id = stm.student_id
         JOIN class_master cm ON cm.class_id = stm.class_id
         JOIN school_master sm ON sm.school_id = cm.school_id
-        JOIN subject_master subm ON subm.subject_id = m.subject_id
+        JOIN subject_master sub ON sub.subject_id = m.subject_id
         JOIN exam_master em ON em.exam_id = m.exam_id
         """,
         conn,
     )
 
+    # Convert to datetime
+    df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce")
+    return df
 
 df = load_data()
 
@@ -1614,8 +1618,13 @@ def _admin_panel():
                         st.rerun()
 
         st.divider()
-        st.dataframe(load_data().sort_values(["school", "class", "section", "student", "exam", "subject"]), use_container_width=True)
+        #st.dataframe(load_data().sort_values(["school", "class", "section", "student", "exam", "subject"]), use_container_width=True)
+        df_display = load_data().sort_values(
+            ["school", "class", "section", "student", "start_date", "subject"],
+            ascending=[True, True, True, True, False, True]
+        )
 
+        st.dataframe(df_display, use_container_width=True)
 
 # ---------------- ADMIN: DATA MANAGEMENT ----------------
 if st.session_state.role == "Admin":
@@ -1646,8 +1655,15 @@ if st.session_state.level == "school":
         if "school" in df.columns and df["school"].nunique() > 1:
             selected_school = st.selectbox("Select School", sorted(df["school"].unique()))
             df = df[df["school"] == selected_school].copy()
+        
+        exam_order = (
+            df[["exam", "start_date"]]
+            .drop_duplicates()
+            .sort_values("start_date", ascending=False)
+        )
 
-        exams = sorted(df["exam"].unique(), reverse=True)
+        exams = exam_order["exam"].tolist()
+        #exams = sorted(df["exam"].unique(), reverse=True)
 
         for i, exam in enumerate(exams):
             with st.expander(f"📘 Exam: {exam}", expanded=(i == 0)):
@@ -1769,7 +1785,14 @@ if st.session_state.level == "class":
         if cdf.empty:
             st.warning("No data available for selected class")
         else:
-            exams = sorted(cdf["exam"].unique(), reverse=True)
+            exam_order = (
+                df[["exam", "start_date"]]
+                .drop_duplicates()
+                .sort_values("start_date", ascending=False)
+            )
+
+            exams = exam_order["exam"].tolist()
+            #exams = sorted(cdf["exam"].unique(), reverse=True)
 
             for i, exam in enumerate(exams):
                 with st.expander(f"📘 Exam: {exam}", expanded=(i == 0)):
@@ -1884,10 +1907,18 @@ if st.session_state.level == "student":
         if stf.empty:
             st.warning("No data available for selected student")
         else:
-            exams = sorted(stf["exam"].unique(), reverse=True)
+            #exams = sorted(stf["exam"].unique(), reverse=True)
+            exam_order = (
+                df[["exam", "start_date"]]
+                .drop_duplicates()
+                .sort_values("start_date", ascending=False)
+            )
+
+            exams = exam_order["exam"].tolist()
 
             for i, exam in enumerate(exams):
-                with st.expander(f"📘 Exam: {exam}", expanded=(i == 0)):
+                #with st.expander(f"📘 Exam: {exam}", expanded=(i == 0)):
+                with st.expander(f"📘 {exam} ({date.strftime('%d %b %Y')})"):
                     edf = stf[stf["exam"] == exam]
 
                     # Tabs for mobile-friendly layout
