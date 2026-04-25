@@ -660,23 +660,40 @@ def _normalize_str(x) -> str:
 
 def _import_students_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
     """
+    Student Class bulk upload.
+
     Expected columns:
-      school, class, section, student
+      class_id, student_id
     Optional:
-      roll_no
+      roll_no, Academic_Year (or academic_year)
     """
-    required = ["school", "class", "section", "student"]
-    missing = [c for c in required if c not in csv_df.columns]
+    df_in = csv_df.copy()
+    df_in.columns = [str(c).strip() for c in df_in.columns]
+
+    required = ["class_id", "student_id"]
+    missing = [c for c in required if c not in df_in.columns]
     if missing:
         raise ValueError(f"Missing columns: {', '.join(missing)}")
 
-    df_in = csv_df.copy()
-    for c in ["school", "class", "section", "student"]:
-        df_in[c] = df_in[c].apply(_normalize_str)
+    academic_year_col = "Academic_Year" if "Academic_Year" in df_in.columns else ("academic_year" if "academic_year" in df_in.columns else None)
+
+    df_in["class_id"] = pd.to_numeric(df_in["class_id"], errors="coerce")
+    df_in["student_id"] = pd.to_numeric(df_in["student_id"], errors="coerce")
+    df_in = df_in.dropna(subset=["class_id", "student_id"]).copy()
+    df_in["class_id"] = df_in["class_id"].astype(int)
+    df_in["student_id"] = df_in["student_id"].astype(int)
+
     if "roll_no" in df_in.columns:
         df_in["roll_no"] = df_in["roll_no"].apply(lambda v: None if _normalize_str(v) == "" else _normalize_str(v))
+    else:
+        df_in["roll_no"] = None
 
-    df_in = df_in[df_in["school"].ne("") & df_in["class"].ne("") & df_in["section"].ne("") & df_in["student"].ne("")].copy()
+    if academic_year_col:
+        df_in["academic_year"] = df_in[academic_year_col].apply(
+            lambda v: CURRENT_ACADEMIC_YEAR if _normalize_str(v) == "" else _normalize_str(v)
+        )
+    else:
+        df_in["academic_year"] = CURRENT_ACADEMIC_YEAR
 
     inserted = 0
     updated = 0
@@ -685,23 +702,50 @@ def _import_students_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
     cur.execute("BEGIN")
     try:
         for row in df_in.itertuples(index=False):
-            school_name = getattr(row, "school")
-            cls = getattr(row, "class")
-            section = getattr(row, "section")
-            student = getattr(row, "student")
-            roll_no = getattr(row, "roll_no") if hasattr(row, "roll_no") else None
+            class_id = int(getattr(row, "class_id"))
+            student_id = int(getattr(row, "student_id"))
+            roll_no = getattr(row, "roll_no")
+            academic_year = getattr(row, "academic_year")
 
-            school_id = _get_or_create_school(cur, school_name)
-            class_id = _get_or_create_class(cur, school_id, cls, section)
+            # Validate foreign keys and fetch the student display name.
+            cur.execute("SELECT 1 FROM class_master WHERE class_id=?", (class_id,))
+            if not cur.fetchone():
+                raise ValueError(f"class_id not found in class_master: {class_id}")
 
-            cur.execute("SELECT student_id, roll_no FROM student_class WHERE class_id=? AND student=?", (class_id, student))
+            cur.execute("SELECT student_name FROM student_master WHERE student_id=?", (student_id,))
+            srow = cur.fetchone()
+            if not srow:
+                raise ValueError(f"student_id not found in student_master: {student_id}")
+            student_name = _normalize_str(srow[0])
+            if student_name == "":
+                raise ValueError(f"student_name is blank for student_id: {student_id}")
+
+            cur.execute(
+                "SELECT class_id, roll_no, academic_year FROM student_class WHERE student_id=?",
+                (student_id,),
+            )
             existing = cur.fetchone()
             if existing:
-                if roll_no:
-                    cur.execute("UPDATE student_class SET roll_no = COALESCE(roll_no, ?) WHERE student_id=?", (roll_no, int(existing[0])))
-                    updated += 1
+                cur.execute(
+                    """
+                    UPDATE student_class
+                    SET class_id=?,
+                        student=?,
+                        roll_no=?,
+                        academic_year=?
+                    WHERE student_id=?
+                    """,
+                    (class_id, student_name, roll_no, academic_year, student_id),
+                )
+                updated += 1
             else:
-                _get_or_create_student(cur, class_id, student, roll_no=roll_no)
+                cur.execute(
+                    """
+                    INSERT INTO student_class (student_id, class_id, student, roll_no, academic_year)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (student_id, class_id, student_name, roll_no, academic_year),
+                )
                 inserted += 1
 
         conn.commit()
@@ -1249,7 +1293,7 @@ def _admin_panel():
         st.markdown(f"Academic year in DB defaults to `{CURRENT_ACADEMIC_YEAR}`.")
 
         st.markdown("**Bulk upload (CSV)**")
-        st.markdown("Upload a CSV with columns: `school,class,section,student` (optional `roll_no`).")
+        st.markdown("Upload a CSV with columns: `class_id,student_id` (optional `roll_no,Academic_Year`).")
         s_file = st.file_uploader("Upload Students CSV", type=["csv"], key="students_csv")
         if s_file:
             try:
@@ -1257,7 +1301,7 @@ def _admin_panel():
                 st.dataframe(s_df.head(50), use_container_width=True)
                 if st.button("Import Students CSV"):
                     ins, upd = _import_students_csv(s_df)
-                    st.success(f"Imported. Inserted: {ins}, Updated roll_no: {upd}")
+                    st.success(f"Imported. Inserted: {ins}, Updated: {upd}")
                     st.rerun()
             except Exception as e:
                 st.error(f"Import failed: {e}")
