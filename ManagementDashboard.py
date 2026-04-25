@@ -212,7 +212,25 @@ def _migrate_schema_additions(cur: sqlite3.Cursor) -> None:
     if _table_exists("student_master") and not _table_exists("student_class"):
         cur.execute("ALTER TABLE student_master RENAME TO student_class")
 
-   
+    # Add additive columns for older DBs (SQLite ALTER TABLE is limited but supports ADD COLUMN)
+    if _table_exists("exam_master"):
+        if not _table_has_column("exam_master", "academic_year"):
+            cur.execute("ALTER TABLE exam_master ADD COLUMN academic_year TEXT NOT NULL DEFAULT '2025-2026'")
+        if not _table_has_column("exam_master", "start_date"):
+            cur.execute("ALTER TABLE exam_master ADD COLUMN start_date TEXT")
+        if not _table_has_column("exam_master", "end_date"):
+            cur.execute("ALTER TABLE exam_master ADD COLUMN end_date TEXT")
+
+    if _table_exists("student_class"):
+        if not _table_has_column("student_class", "academic_year"):
+            cur.execute("ALTER TABLE student_class ADD COLUMN academic_year TEXT NOT NULL DEFAULT '2025-2026'")
+
+    if _table_exists("class_master"):
+        if not _table_has_column("class_master", "Academic_Year"):
+            cur.execute("ALTER TABLE class_master ADD COLUMN Academic_Year TEXT NOT NULL DEFAULT '2025-2026'")
+        if not _table_has_column("class_master", "class_teacher"):
+            cur.execute("ALTER TABLE class_master ADD COLUMN class_teacher INTEGER")
+
 def _migrate_student_master_and_links(cur: sqlite3.Cursor) -> None:
     """
     Adds `student_master` (requested) and ensures student_id is linked everywhere.
@@ -1375,8 +1393,8 @@ def _admin_panel():
                             cur.execute(
                                 """
                                 UPDATE exam_master
-                                SET start_date = COALESCE(start_date, ?),
-                                    end_date = COALESCE(end_date, ?)
+                                SET start_date = ?,
+                                    end_date = ?
                                 WHERE exam_id=?
                                 """,
                                 (start_date.isoformat(), end_date.isoformat(), exam_id),
