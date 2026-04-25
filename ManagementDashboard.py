@@ -116,12 +116,13 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS student_class (
-            student_id INTEGER PRIMARY KEY,
+            student_class_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER NOT NULL,
             class_id INTEGER NOT NULL,
             student TEXT NOT NULL,
             roll_no TEXT,
             academic_year TEXT NOT NULL DEFAULT '2025-2026',
-            UNIQUE (class_id, student),
+            UNIQUE (student_id, class_id, academic_year),
             FOREIGN KEY (class_id) REFERENCES class_master(class_id) ON DELETE CASCADE,
             FOREIGN KEY (student_id) REFERENCES student_master(student_id) ON DELETE CASCADE
         )
@@ -166,16 +167,76 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
     cur.execute("""
         CREATE TABLE IF NOT EXISTS marks (
             marks_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_id INTEGER NOT NULL,
+            student_class_id INTEGER NOT NULL,
             subject_id INTEGER NOT NULL,
             exam_id INTEGER NOT NULL,
             marks INTEGER NOT NULL,
-            UNIQUE (student_id, subject_id, exam_id),
-            FOREIGN KEY (student_id) REFERENCES student_master(student_id) ON DELETE CASCADE,
+            UNIQUE (student_class_id, subject_id, exam_id),
+            FOREIGN KEY (student_class_id) REFERENCES student_class(student_class_id) ON DELETE CASCADE,
             FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE,
             FOREIGN KEY (exam_id) REFERENCES exam_master(exam_id) ON DELETE CASCADE
         )
     """)
+
+
+def _migrate_student_class_pk_and_marks(cur: sqlite3.Cursor) -> None:
+    """
+    Migrate older DBs to:
+    - student_class(student_class_id PK, student_id FK, class_id, ...)
+    - marks(student_class_id FK, exam_id, subject_id, marks)
+    """
+    if _table_exists("student_class") and not _table_has_column("student_class", "student_class_id"):
+        cur.execute("ALTER TABLE student_class RENAME TO student_class_old_no_pk")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS student_class (
+                student_class_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                class_id INTEGER NOT NULL,
+                student TEXT NOT NULL,
+                roll_no TEXT,
+                academic_year TEXT NOT NULL DEFAULT '2025-2026',
+                UNIQUE (student_id, class_id, academic_year),
+                FOREIGN KEY (class_id) REFERENCES class_master(class_id) ON DELETE CASCADE,
+                FOREIGN KEY (student_id) REFERENCES student_master(student_id) ON DELETE CASCADE
+            )
+        """)
+        # Preserve existing mappings; academic_year may be missing in older DBs.
+        if _table_has_column("student_class_old_no_pk", "academic_year"):
+            cur.execute("""
+                INSERT INTO student_class (student_id, class_id, student, roll_no, academic_year)
+                SELECT student_id, class_id, student, roll_no, COALESCE(academic_year, '2025-2026')
+                FROM student_class_old_no_pk
+            """)
+        else:
+            cur.execute("""
+                INSERT INTO student_class (student_id, class_id, student, roll_no, academic_year)
+                SELECT student_id, class_id, student, roll_no, '2025-2026'
+                FROM student_class_old_no_pk
+            """)
+
+    # Migrate marks if it still stores student_id.
+    if _table_exists("marks") and _table_has_column("marks", "student_id") and not _table_has_column("marks", "student_class_id"):
+        cur.execute("ALTER TABLE marks RENAME TO marks_old_student_id")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS marks (
+                marks_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_class_id INTEGER NOT NULL,
+                subject_id INTEGER NOT NULL,
+                exam_id INTEGER NOT NULL,
+                marks INTEGER NOT NULL,
+                UNIQUE (student_class_id, subject_id, exam_id),
+                FOREIGN KEY (student_class_id) REFERENCES student_class(student_class_id) ON DELETE CASCADE,
+                FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE,
+                FOREIGN KEY (exam_id) REFERENCES exam_master(exam_id) ON DELETE CASCADE
+            )
+        """)
+        # Old schemas had one student_class row per student_id, so this join is stable.
+        cur.execute("""
+            INSERT INTO marks (marks_id, student_class_id, subject_id, exam_id, marks)
+            SELECT m.marks_id, sc.student_class_id, m.subject_id, m.exam_id, m.marks
+            FROM marks_old_student_id m
+            JOIN student_class sc ON sc.student_id = m.student_id
+        """)
 
 
 def _migrate_schema_additions(cur: sqlite3.Cursor) -> None:
@@ -262,34 +323,6 @@ def _migrate_student_master_and_links(cur: sqlite3.Cursor) -> None:
             FROM student_class
             WHERE student_id IS NOT NULL AND TRIM(COALESCE(student, '')) <> ''
         """)
-
-    # If marks FK still points to student_class, rebuild marks to reference student_master
-    if _table_exists("marks"):
-        fk = _foreign_key_refs("marks")
-        needs_rebuild = any((from_col == "student_id" and ref_table == "student_class") for from_col, ref_table in fk)
-        if needs_rebuild:
-            # Rename old table
-            cur.execute("ALTER TABLE marks RENAME TO marks_old_fk_student_class")
-            # Create new marks with correct FK
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS marks (
-                    marks_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    student_id INTEGER NOT NULL,
-                    subject_id INTEGER NOT NULL,
-                    exam_id INTEGER NOT NULL,
-                    marks INTEGER NOT NULL,
-                    UNIQUE (student_id, subject_id, exam_id),
-                    FOREIGN KEY (student_id) REFERENCES student_master(student_id) ON DELETE CASCADE,
-                    FOREIGN KEY (subject_id) REFERENCES subject_master(subject_id) ON DELETE CASCADE,
-                    FOREIGN KEY (exam_id) REFERENCES exam_master(exam_id) ON DELETE CASCADE
-                )
-            """)
-            # Copy data
-            cur.execute("""
-                INSERT INTO marks (marks_id, student_id, subject_id, exam_id, marks)
-                SELECT marks_id, student_id, subject_id, exam_id, marks
-                FROM marks_old_fk_student_class
-            """)
 
 
 def _get_or_create_school(cur: sqlite3.Cursor, school_name: str) -> int:
@@ -406,7 +439,14 @@ def _get_or_create_student(cur: sqlite3.Cursor, class_id: int, student: str, rol
     roll_no = None if roll_no is None or (isinstance(roll_no, float) and np.isnan(roll_no)) else str(roll_no).strip()
 
     # If already mapped for this class, ensure a student_master row exists and return id.
-    cur.execute("SELECT student_id, roll_no FROM student_class WHERE class_id=? AND student=?", (class_id, student))
+    cur.execute(
+        """
+        SELECT student_id, roll_no
+        FROM student_class
+        WHERE class_id=? AND student=? AND COALESCE(academic_year, ?) = ?
+        """,
+        (class_id, student, CURRENT_ACADEMIC_YEAR, CURRENT_ACADEMIC_YEAR),
+    )
     existing = cur.fetchone()
     if existing:
         student_id = int(existing[0])
@@ -431,21 +471,49 @@ def _get_or_create_student(cur: sqlite3.Cursor, class_id: int, student: str, rol
             """
             UPDATE student_class
             SET roll_no = COALESCE(roll_no, ?)
-            WHERE class_id=? AND student=?
+            WHERE class_id=? AND student=? AND COALESCE(academic_year, ?) = ?
             """,
-            (roll_no, class_id, student),
+            (roll_no, class_id, student, CURRENT_ACADEMIC_YEAR, CURRENT_ACADEMIC_YEAR),
         )
     if _table_has_column("student_class", "academic_year"):
         cur.execute(
             """
             UPDATE student_class
             SET academic_year = COALESCE(academic_year, ?)
-            WHERE class_id=? AND student=?
+            WHERE class_id=? AND student=? AND COALESCE(academic_year, ?) = ?
             """,
-            (CURRENT_ACADEMIC_YEAR, class_id, student),
+            (CURRENT_ACADEMIC_YEAR, class_id, student, CURRENT_ACADEMIC_YEAR, CURRENT_ACADEMIC_YEAR),
         )
 
     return int(student_id)
+
+
+def _get_student_class_id(cur: sqlite3.Cursor, class_id: int, student_id: int, academic_year: Optional[str] = None) -> int:
+    academic_year = CURRENT_ACADEMIC_YEAR if _normalize_str(academic_year or "") == "" else str(academic_year).strip()
+    cur.execute(
+        """
+        SELECT student_class_id
+        FROM student_class
+        WHERE class_id=? AND student_id=? AND COALESCE(academic_year, ?) = ?
+        """,
+        (class_id, student_id, academic_year, academic_year),
+    )
+    row = cur.fetchone()
+    if row:
+        return int(row[0])
+
+    # Backfill mapping if missing (should be rare for migrated DBs)
+    cur.execute("SELECT student_name FROM student_master WHERE student_id=?", (student_id,))
+    srow = cur.fetchone()
+    student_name = _normalize_str(srow[0]) if srow else ""
+    cur.execute(
+        """
+        INSERT INTO student_class (student_id, class_id, student, roll_no, academic_year)
+        VALUES (?, ?, ?, NULL, ?)
+        """,
+        (student_id, class_id, student_name or str(student_id), academic_year),
+    )
+    return int(cur.lastrowid)
 
 
 def _migrate_legacy_marks(cur: sqlite3.Cursor) -> None:
@@ -457,7 +525,7 @@ def _migrate_legacy_marks(cur: sqlite3.Cursor) -> None:
     if not cur.fetchone():
         return
 
-    is_normalized = _table_has_column("marks", "student_id")
+    is_normalized = _table_has_column("marks", "student_class_id")
     if is_normalized:
         return
 
@@ -488,6 +556,7 @@ def _migrate_legacy_marks(cur: sqlite3.Cursor) -> None:
     subject_cache: dict[Tuple[int, str], int] = {}
     exam_cache: dict[Tuple[int, str], int] = {}
     student_cache: dict[Tuple[int, str], int] = {}
+    student_class_cache: dict[Tuple[int, int], int] = {}
 
     for row in legacy_df.itertuples(index=False):
         cls = getattr(row, "class")
@@ -508,6 +577,11 @@ def _migrate_legacy_marks(cur: sqlite3.Cursor) -> None:
         if student_id is None:
             student_id = _get_or_create_student(cur, class_id, student)
             student_cache[student_key] = student_id
+        sc_key = (class_id, student_id)
+        student_class_id = student_class_cache.get(sc_key)
+        if student_class_id is None:
+            student_class_id = _get_student_class_id(cur, class_id, student_id, academic_year=CURRENT_ACADEMIC_YEAR)
+            student_class_cache[sc_key] = student_class_id
 
         subject_key = (default_school_id, subject)
         subject_id = subject_cache.get(subject_key)
@@ -523,10 +597,10 @@ def _migrate_legacy_marks(cur: sqlite3.Cursor) -> None:
 
         cur.execute(
             """
-            INSERT OR REPLACE INTO marks (student_id, subject_id, exam_id, marks)
+            INSERT OR REPLACE INTO marks (student_class_id, subject_id, exam_id, marks)
             VALUES (?, ?, ?, ?)
             """,
-            (student_id, subject_id, exam_id, marks_val),
+            (student_class_id, subject_id, exam_id, marks_val),
         )
 
 
@@ -544,6 +618,9 @@ def init_db():
 
     # Add requested student_master + re-link student_id FKs.
     _migrate_student_master_and_links(cur)
+
+    # Introduce student_class_id PK and re-key marks.
+    _migrate_student_class_pk_and_marks(cur)
 
     # Insert default users if not exists
     users = [
@@ -658,8 +735,8 @@ def load_data():
             em.exam AS exam,
             m.marks AS marks
         FROM marks m
-        JOIN student_master smm ON smm.student_id = m.student_id
-        JOIN student_class stm ON stm.student_id = m.student_id
+        JOIN student_class stm ON stm.student_class_id = m.student_class_id
+        JOIN student_master smm ON smm.student_id = stm.student_id
         JOIN class_master cm ON cm.class_id = stm.class_id
         JOIN school_master sm ON sm.school_id = cm.school_id
         JOIN subject_master subm ON subm.subject_id = m.subject_id
@@ -740,21 +817,24 @@ def _import_students_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
                 raise ValueError(f"student_name is blank for student_id: {student_id}")
 
             cur.execute(
-                "SELECT class_id, roll_no, academic_year FROM student_class WHERE student_id=?",
-                (student_id,),
+                """
+                SELECT student_class_id
+                FROM student_class
+                WHERE student_id=? AND class_id=? AND COALESCE(academic_year, ?) = ?
+                """,
+                (student_id, class_id, academic_year, academic_year),
             )
             existing = cur.fetchone()
             if existing:
                 cur.execute(
                     """
                     UPDATE student_class
-                    SET class_id=?,
-                        student=?,
+                    SET student=?,
                         roll_no=?,
                         academic_year=?
-                    WHERE student_id=?
+                    WHERE student_class_id=?
                     """,
-                    (class_id, student_name, roll_no, academic_year, student_id),
+                    (student_name, roll_no, academic_year, int(existing[0])),
                 )
                 updated += 1
             else:
@@ -778,22 +858,27 @@ def _import_students_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
 def _import_marks_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
     """
     Expected columns:
-      school, class, section, student, subject, exam, marks
-    Optional:
-      roll_no
+      student_class_id, subject_id, exam_id, marks
     """
-    required = ["school", "class", "section", "student", "subject", "exam", "marks"]
+
+    required = ["student_class_id", "subject_id", "exam_id", "marks"]
     missing = [c for c in required if c not in csv_df.columns]
     if missing:
         raise ValueError(f"Missing columns: {', '.join(missing)}")
 
     df_in = csv_df.copy()
-    for c in ["school", "class", "section", "student", "subject", "exam"]:
-        df_in[c] = df_in[c].apply(_normalize_str)
-    if "roll_no" in df_in.columns:
-        df_in["roll_no"] = df_in["roll_no"].apply(lambda v: None if _normalize_str(v) == "" else _normalize_str(v))
+
+    # Convert types
+    df_in["student_class_id"] = pd.to_numeric(df_in["student_class_id"], errors="coerce")
+    df_in["subject_id"] = pd.to_numeric(df_in["subject_id"], errors="coerce")
+    df_in["exam_id"] = pd.to_numeric(df_in["exam_id"], errors="coerce")
     df_in["marks"] = pd.to_numeric(df_in["marks"], errors="coerce")
-    df_in = df_in.dropna(subset=["marks"]).copy()
+
+    df_in = df_in.dropna(subset=["student_class_id", "subject_id", "exam_id", "marks"]).copy()
+
+    df_in["student_class_id"] = df_in["student_class_id"].astype(int)
+    df_in["subject_id"] = df_in["subject_id"].astype(int)
+    df_in["exam_id"] = df_in["exam_id"].astype(int)
     df_in["marks"] = df_in["marks"].astype(int)
 
     inserted = 0
@@ -801,41 +886,51 @@ def _import_marks_csv(csv_df: pd.DataFrame) -> Tuple[int, int]:
 
     cur = conn.cursor()
     cur.execute("BEGIN")
+
     try:
         for row in df_in.itertuples(index=False):
-            school_name = getattr(row, "school")
-            cls = getattr(row, "class")
-            section = getattr(row, "section")
-            student = getattr(row, "student")
-            subject = getattr(row, "subject")
-            exam = getattr(row, "exam")
-            marks_val = int(getattr(row, "marks"))
-            roll_no = getattr(row, "roll_no") if hasattr(row, "roll_no") else None
+            sc_id = row.student_class_id
+            subject_id = row.subject_id
+            exam_id = row.exam_id
+            marks_val = row.marks
 
-            school_id = _get_or_create_school(cur, school_name)
-            class_id = _get_or_create_class(cur, school_id, cls, section)
-            student_id = _get_or_create_student(cur, class_id, student, roll_no=roll_no)
-            subject_id = _get_or_create_subject(cur, school_id, subject)
-            exam_id = _get_or_create_exam(cur, school_id, exam)
+            # Validate FK existence
+            cur.execute("SELECT 1 FROM student_class WHERE student_class_id=?", (sc_id,))
+            if not cur.fetchone():
+                raise ValueError(f"Invalid student_class_id: {sc_id}")
 
-            cur.execute(
-                "SELECT marks_id, marks FROM marks WHERE student_id=? AND subject_id=? AND exam_id=?",
-                (student_id, subject_id, exam_id),
-            )
+            cur.execute("SELECT 1 FROM subject_master WHERE subject_id=?", (subject_id,))
+            if not cur.fetchone():
+                raise ValueError(f"Invalid subject_id: {subject_id}")
+
+            cur.execute("SELECT 1 FROM exam_master WHERE exam_id=?", (exam_id,))
+            if not cur.fetchone():
+                raise ValueError(f"Invalid exam_id: {exam_id}")
+
+            # Check existing
+            cur.execute("""
+                SELECT marks_id FROM marks
+                WHERE student_class_id=? AND subject_id=? AND exam_id=?
+            """, (sc_id, subject_id, exam_id))
+
             existing = cur.fetchone()
+
             if existing:
-                cur.execute(
-                    "UPDATE marks SET marks=? WHERE marks_id=?",
-                    (marks_val, int(existing[0])),
-                )
+                cur.execute("""
+                    UPDATE marks
+                    SET marks=?
+                    WHERE marks_id=?
+                """, (marks_val, existing[0]))
                 updated += 1
             else:
-                cur.execute(
-                    "INSERT INTO marks (student_id, subject_id, exam_id, marks) VALUES (?, ?, ?, ?)",
-                    (student_id, subject_id, exam_id, marks_val),
-                )
+                cur.execute("""
+                    INSERT INTO marks (student_class_id, subject_id, exam_id, marks)
+                    VALUES (?, ?, ?, ?)
+                """, (sc_id, subject_id, exam_id, marks_val))
                 inserted += 1
+
         conn.commit()
+
     except Exception:
         conn.rollback()
         raise
@@ -1357,7 +1452,7 @@ def _admin_panel():
             st.dataframe(
                 pd.read_sql(
                     """
-                    SELECT stm.student_id, sm.school_name, cm.class, cm.section, stm.student, stm.roll_no,
+                    SELECT stm.student_class_id, stm.student_id, sm.school_name, cm.class, cm.section, stm.student, stm.roll_no,
                            COALESCE(stm.academic_year, ?) AS academic_year
                     FROM student_class stm
                     JOIN class_master cm ON cm.class_id = stm.class_id
@@ -1441,7 +1536,7 @@ def _admin_panel():
 
     with tab9:
         st.markdown("**Marks**")
-        st.markdown("Upload a CSV with columns: `school,class,section,student,subject,exam,marks` (optional `roll_no`).")
+        st.markdown("Upload a CSV with columns: `student_class_id,subject_id,exam_id,marks`.")
 
         file = st.file_uploader("Upload Marks CSV", type=["csv"], key="marks_csv")
         if file:
@@ -1488,7 +1583,7 @@ def _admin_panel():
                 class_id = int(classes.iloc[class_section_label.index(chosen_class_section)]["class_id"])
 
                 students = pd.read_sql(
-                    "SELECT student_id, student FROM student_class WHERE class_id=? ORDER BY student",
+                    "SELECT student_class_id, student_id, student FROM student_class WHERE class_id=? ORDER BY student",
                     conn,
                     params=(class_id,),
                 )
@@ -1496,7 +1591,7 @@ def _admin_panel():
                     st.warning("Create students for this class-section first.")
                 else:
                     student_name = st.selectbox("Student", students["student"].tolist(), key="m_student")
-                    student_id = int(students[students["student"] == student_name]["student_id"].iloc[0])
+                    student_class_id = int(students[students["student"] == student_name]["student_class_id"].iloc[0])
 
                     subject_name = st.selectbox("Subject", subjects["subject"].tolist(), key="m_subject")
                     subject_id = int(subjects[subjects["subject"] == subject_name]["subject_id"].iloc[0])
@@ -1509,10 +1604,10 @@ def _admin_panel():
                     if st.button("Save Marks"):
                         cur.execute(
                             """
-                            INSERT OR REPLACE INTO marks (student_id, subject_id, exam_id, marks)
+                            INSERT OR REPLACE INTO marks (student_class_id, subject_id, exam_id, marks)
                             VALUES (?, ?, ?, ?)
                             """,
-                            (student_id, subject_id, exam_id, int(marks_val)),
+                            (student_class_id, subject_id, exam_id, int(marks_val)),
                         )
                         conn.commit()
                         st.success("Saved.")
