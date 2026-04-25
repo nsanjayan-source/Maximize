@@ -1881,22 +1881,43 @@ if st.session_state.level == "student":
     else:
         # Select Class first (to scope students)
         classes = sorted(df["class"].unique())
-        selected_class = st.selectbox("Select Class", classes)
+        # selected_class = st.selectbox("Select Class", classes)
 
-        sections = sorted(
-            df[df["class"] == selected_class]["section"].dropna().unique()
-        )
+        # sections = sorted(
+        #     df[df["class"] == selected_class]["section"].dropna().unique()
+        # )
 
-        selected_section = st.selectbox("Select Section", sections)
+        # selected_section = st.selectbox("Select Section", sections)
 
-        students = sorted(
-        df[
-            (df["class"] == selected_class) &
-            (df["section"] == selected_section)
-        ]["student"].unique()
-        )
+        # students = sorted(
+        # df[
+        #     (df["class"] == selected_class) &
+        #     (df["section"] == selected_section)
+        # ]["student"].unique()
+        # )
 
-        selected_student = st.selectbox("Select Student", students)
+        # selected_student = st.selectbox("Select Student", students)
+
+        # --- FILTERS IN ONE ROW ---
+        col1, col2, col3 = st.columns([1, 1, 1])
+
+        with col1:
+            selected_class = st.selectbox("Class", classes, label_visibility="collapsed")
+
+        with col2:
+            sections = sorted(
+                df[df["class"] == selected_class]["section"].dropna().unique()
+            )
+            selected_section = st.selectbox("Section", sections, label_visibility="collapsed")
+
+        with col3:
+            students = sorted(
+                df[
+                    (df["class"] == selected_class) &
+                    (df["section"] == selected_section)
+                ]["student"].unique()
+            )
+            selected_student = st.selectbox("Student", students, label_visibility="collapsed")
 
         stf = df[
             (df["class"] == selected_class) &
@@ -1907,6 +1928,119 @@ if st.session_state.level == "student":
         if stf.empty:
             st.warning("No data available for selected student")
         else:
+            # ================= OVERALL STUDENT DASHBOARD =================
+            st.markdown("### 📊 Student Performance Summary")
+
+            # Sort exams chronologically
+            exam_df = stf[["exam", "start_date"]].drop_duplicates().sort_values("start_date")
+
+            # --- Overall average per exam ---
+            exam_avg = (
+                stf.groupby(["exam", "start_date"])["marks"]
+                .mean()
+                .reset_index()
+                .sort_values("start_date")
+            )
+
+            # Current overall %
+            overall_current = exam_avg["marks"].mean()
+
+            # Previous overall %
+            if len(exam_avg) > 1:
+                prev_avg = exam_avg.iloc[:-1]["marks"].mean()
+            else:
+                prev_avg = overall_current
+
+            # Trend
+            trend_up = overall_current >= prev_avg
+            triangle = "▲" if trend_up else "▼"
+            color = "green" if trend_up else "red"
+
+            # --- SUBJECT AVERAGES ---
+            subject_avg = (
+                stf.groupby(["subject", "exam", "start_date"])["marks"]
+                .mean()
+                .reset_index()
+            )
+
+            # current subject avg
+            subject_current = subject_avg.groupby("subject")["marks"].mean()
+
+            # previous subject avg
+            subject_prev = (
+                subject_avg.sort_values("start_date")
+                .groupby("subject")
+                .apply(lambda x: x.iloc[:-1]["marks"].mean() if len(x) > 1 else x["marks"].mean())
+            )
+
+            # merge
+            sub_df = pd.DataFrame({
+                "current": subject_current,
+                "previous": subject_prev
+            }).fillna(0)
+
+            sub_df["trend"] = sub_df["current"] >= sub_df["previous"]
+
+            # max & min subjects
+            max_sub = sub_df["current"].idxmax()
+            min_sub = sub_df["current"].idxmin()
+
+            # -------- UI BOX --------
+            box = st.container()
+
+            with box:
+                st.markdown(
+                    f"""
+                    <div style="background-color:#dbe3ec;padding:20px;border-radius:20px;text-align:center;">
+                        <div style="font-size:16px;font-weight:bold;">OVERALL % FOR THE YEAR</div>
+                        <div style="font-size:40px;font-weight:bold;color:{color};">
+                            {overall_current:.2f}% {triangle}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                col1, col2 = st.columns(2)
+
+                # ---------- MAX ----------
+                with col1:
+                    max_trend = sub_df.loc[max_sub, "trend"]
+                    max_color = "green" if max_trend else "red"
+                    max_triangle = "▲" if max_trend else "▼"
+
+                    st.markdown(
+                        f"""
+                        <div style="background-color:#dbe3ec;padding:20px;border-radius:20px;text-align:center;">
+                            <div style="font-weight:bold;">MAXIMUM AVERAGE</div>
+                            <div style="font-size:24px;font-weight:bold;">{max_sub} {max_triangle}</div>
+                            <div style="font-size:28px;color:{max_color};">
+                                {sub_df.loc[max_sub, "current"]:.1f} %
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                # ---------- MIN ----------
+                with col2:
+                    min_trend = sub_df.loc[min_sub, "trend"]
+                    min_color = "green" if min_trend else "red"
+                    min_triangle = "▲" if min_trend else "▼"
+
+                    st.markdown(
+                        f"""
+                        <div style="background-color:#dbe3ec;padding:20px;border-radius:20px;text-align:center;">
+                            <div style="font-weight:bold;">MINIMUM AVERAGE</div>
+                            <div style="font-size:24px;font-weight:bold;">{min_sub} {min_triangle}</div>
+                            <div style="font-size:28px;color:{min_color};">
+                                {sub_df.loc[min_sub, "current"]:.1f} %
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
             #exams = sorted(stf["exam"].unique(), reverse=True)
             exam_order = (
                 df[["exam", "start_date"]]
