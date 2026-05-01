@@ -153,7 +153,40 @@ class _CompatConn:
         self._is_postgres = is_postgres
 
     def cursor(self):
-        return _CompatCursor(self._conn.cursor(), self._is_postgres)
+        # DB-API connections expose .cursor(). SQLAlchemy Connection does not;
+        # for SQLite we may get an engine.connect() object, so unwrap to DB-API.
+        if hasattr(self._conn, "cursor"):
+            return _CompatCursor(self._conn.cursor(), self._is_postgres)
+
+        # SQLAlchemy Connection: try common unwrapping attributes/methods.
+        raw = None
+        for attr in ("connection", "driver_connection", "dbapi_connection"):
+            try:
+                raw = getattr(self._conn, attr)
+            except Exception:
+                raw = None
+            if raw is not None:
+                break
+        if raw is None and hasattr(self._conn, "get_raw_connection"):
+            try:
+                raw = self._conn.get_raw_connection()
+            except Exception:
+                raw = None
+
+        if raw is None:
+            raise AttributeError("Underlying connection does not provide a DB-API cursor()")
+
+        # SQLAlchemy sometimes wraps the DB-API connection in a proxy that still
+        # provides .cursor(); fall back to common proxy attributes if needed.
+        if not hasattr(raw, "cursor") and hasattr(raw, "connection"):
+            raw = raw.connection
+        if not hasattr(raw, "cursor") and hasattr(raw, "driver_connection"):
+            raw = raw.driver_connection
+
+        if not hasattr(raw, "cursor"):
+            raise AttributeError("Underlying connection does not provide a DB-API cursor()")
+
+        return _CompatCursor(raw.cursor(), self._is_postgres)
 
     def commit(self):
         return self._conn.commit()
