@@ -542,14 +542,14 @@ def init_db():
     cur = conn.cursor()
     # Tables are managed externally (no CREATE/ALTER/migrations here).
 
-    # Insert default users if not exists
-    users = [
-        ("admin", hash_pw("admin123"), "Admin"),
-        ("teacher", hash_pw("teacher123"), "Teacher"),
-        ("parent", hash_pw("parent123"), "Parent"),
-    ]
-    for u in users:
-        cur.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?)", u)
+    # # Insert default users if not exists
+    # users = [
+    #     ("admin", hash_pw("admin123"), "Admin"),
+    #     ("teacher", hash_pw("teacher123"), "Teacher"),
+    #     ("parent", hash_pw("parent123"), "Parent"),
+    # ]
+    # for u in users:
+    #     cur.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?)", u)
 
     # Ensure at least one school exists so admin screens have defaults
     _get_or_create_school(cur, "Default School")
