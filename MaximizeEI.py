@@ -569,7 +569,7 @@ def login():
             st.rerun()
         else:
             st.error("Invalid credentials")
-            print("Pwd in DB for this user", row[0])
+            st.error("Pwd in DB for this user", row[0])
 
 
 def logout():
