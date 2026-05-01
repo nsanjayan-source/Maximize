@@ -25,6 +25,9 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 # ---------------- DB ----------------
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MAXIMIZE_DATABASE_URL")
 # Allow Streamlit Secrets to provide DATABASE_URL (e.g., Streamlit Cloud).
+
+@st.cache_resource
+
 if not DATABASE_URL:
     try:
         DATABASE_URL = st.secrets["DATABASE_URL"]
@@ -483,18 +486,6 @@ def _migrate_legacy_marks(cur: Any) -> None:
 
 def init_db():
     cur = conn.cursor()
-    # Tables are managed externally (no CREATE/ALTER/migrations here).
-
-    # # Insert default users if not exists
-    # users = [
-    #     ("admin", hash_pw("admin123"), "Admin"),
-    #     ("teacher", hash_pw("teacher123"), "Teacher"),
-    #     ("parent", hash_pw("parent123"), "Parent"),
-    # ]
-    # for u in users:
-    #     cur.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?)", u)
-
-    # Ensure at least one school exists so admin screens have defaults
     _get_or_create_school(cur, "Default School")
 
     conn.commit()
@@ -569,8 +560,6 @@ def login():
             st.rerun()
         else:
             st.error("Invalid credentials")
-            st.error(row[0])
-            st.error(hash_pw(p))
 
 
 def logout():
