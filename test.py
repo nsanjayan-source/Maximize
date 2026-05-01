@@ -1,5 +1,8 @@
-import pkgutil
+import importlib.util
 import streamlit as st
 
-st.write("psycopg found:", pkgutil.find_loader("psycopg") is not None)
-st.write("psycopg2 found:", pkgutil.find_loader("psycopg2") is not None)
+psycopg_found = importlib.util.find_spec("psycopg") is not None
+psycopg2_found = importlib.util.find_spec("psycopg2") is not None
+
+st.write("psycopg found:", psycopg_found)
+st.write("psycopg2 found:", psycopg2_found)
