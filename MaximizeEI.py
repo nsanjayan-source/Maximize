@@ -570,6 +570,7 @@ def login():
         else:
             st.error("Invalid credentials")
             st.error(row[0])
+            st.error(p)
 
 
 def logout():
