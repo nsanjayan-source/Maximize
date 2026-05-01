@@ -26,8 +26,6 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MAXIMIZE_DATABASE_URL")
 # Allow Streamlit Secrets to provide DATABASE_URL (e.g., Streamlit Cloud).
 
-@st.cache_resource
-
 if not DATABASE_URL:
     try:
         DATABASE_URL = st.secrets["DATABASE_URL"]
@@ -75,6 +73,7 @@ def _ensure_sslmode_require(db_url: str) -> str:
         normalized = urlunparse((p.scheme, p.netloc, p.path, "", urlencode(q), ""))
     return normalized
 
+@st.cache_resource
 def _connect_db():
     """
     Returns a DB-API connection (Postgres).
