@@ -21,12 +21,15 @@ import os
 import hashlib
 import datetime as dt
 from typing import Optional, Tuple, Any
+from sqlalchemy import create_engine
 
 # ---------------- DB ----------------
 DEFAULT_POSTGRES_URL = "postgresql://postgres:ReportingBeyondCl@ss@db.nldjrqoiphuuoxuexttc.supabase.co:5432/postgres"
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MAXIMIZE_DATABASE_URL") or DEFAULT_POSTGRES_URL
 IS_POSTGRES = DATABASE_URL.lower().startswith(("postgresql://", "postgres://"))
 
+# Create engine only for SQLite; Postgres uses psycopg directly below.
+engine = create_engine(DATABASE_URL) if not IS_POSTGRES else None
 
 def _connect_db():
     """
@@ -45,7 +48,8 @@ def _connect_db():
             ) from e
         # psycopg defaults to autocommit=False which matches sqlite behavior here
         return psycopg.connect(DATABASE_URL)
-    return sqlite3.connect("school.db", check_same_thread=False)
+    # SQLAlchemy engine connection for SQLite
+    return engine.connect()
 
 
 class _CompatCursor:
