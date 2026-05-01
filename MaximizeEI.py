@@ -562,8 +562,6 @@ def login():
         cur.execute("SELECT password, role FROM users WHERE username=?", (u,))
         row = cur.fetchone()
 
-        print(row)
-
         if row and row[0] == hash_pw(p):
             st.session_state.user = u
             st.session_state.role = row[1]
@@ -571,6 +569,7 @@ def login():
             st.rerun()
         else:
             st.error("Invalid credentials")
+            print("Pwd in DB for this user", row[0])
 
 
 def logout():
