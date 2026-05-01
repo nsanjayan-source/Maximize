@@ -2,7 +2,7 @@
 
 Features:
 - Secure login (hashed passwords, DB users)
-- SQLite database (users + marks)
+- Postgres database (users + marks)
 - Admin: upload real data (CSV)
 - Role-based access (Admin / Teacher / Parent)
 - Drill-down: School → Class → Student
@@ -16,7 +16,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import sqlite3
 import os
 import hashlib
 import datetime as dt
@@ -24,21 +23,24 @@ from typing import Optional, Tuple, Any
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 # ---------------- DB ----------------
-DEFAULT_SQLITE_URL = "sqlite:///maximize.db"
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MAXIMIZE_DATABASE_URL") or DEFAULT_SQLITE_URL
-IS_POSTGRES = DATABASE_URL.lower().startswith(("postgresql://", "postgres://"))
-
-# Create engine only for SQLite; Postgres uses psycopg directly below.
-if not IS_POSTGRES:
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MAXIMIZE_DATABASE_URL")
+# Allow Streamlit Secrets to provide DATABASE_URL (e.g., Streamlit Cloud).
+if not DATABASE_URL:
     try:
-        from sqlalchemy import create_engine  # type: ignore
-    except Exception as e:
-        raise RuntimeError(
-            "SQLite selected but SQLAlchemy is not installed. Install with: pip install sqlalchemy"
-        ) from e
-    engine = create_engine(DATABASE_URL)
-else:
-    engine = None
+        DATABASE_URL = st.secrets["DATABASE_URL"]
+    except Exception:
+        DATABASE_URL = None
+if not DATABASE_URL:
+    st.error("Missing `DATABASE_URL`.")
+    st.caption("Set it in an environment variable or in Streamlit Secrets as `DATABASE_URL`.")
+    st.stop()
+
+if not str(DATABASE_URL).lower().startswith(("postgresql://", "postgres://")):
+    st.error("Invalid `DATABASE_URL` scheme.")
+    st.caption("Expected `postgresql://...` (or `postgres://...`).")
+    st.stop()
+
+IS_POSTGRES = True
 
 
 def _sanitize_db_url(db_url: str) -> str:
@@ -72,31 +74,33 @@ def _ensure_sslmode_require(db_url: str) -> str:
 
 def _connect_db():
     """
-    Returns a DB-API connection (SQLite or Postgres).
+    Returns a DB-API connection (Postgres).
 
     NOTE: For security, prefer setting DATABASE_URL / MAXIMIZE_DATABASE_URL
     instead of hardcoding credentials.
     """
-    if IS_POSTGRES:
-        try:
-            import psycopg  # psycopg3
-        except Exception as e:  # pragma: no cover
-            raise RuntimeError(
-                "Postgres selected but psycopg is not installed. "
-                "Install with: pip install psycopg[binary]"
-            ) from e
-        # psycopg defaults to autocommit=False which matches sqlite behavior here
+    try:
+        import psycopg  # psycopg3
         conninfo = _ensure_sslmode_require(DATABASE_URL)
         return psycopg.connect(conninfo)
-    # SQLAlchemy engine connection for SQLite
-    return engine.connect()
+    except Exception:
+        # Fallback for environments that have psycopg2 installed instead of psycopg3
+        try:
+            import psycopg2  # type: ignore
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(
+                "Postgres selected but neither psycopg (v3) nor psycopg2 is installed. "
+                "Install with: pip install psycopg[binary]  (recommended)  or  pip install psycopg2-binary"
+            ) from e
+        conninfo = _ensure_sslmode_require(DATABASE_URL)
+        return psycopg2.connect(conninfo, sslmode="require")
 
 
 class _CompatCursor:
     """
     Small SQL compatibility layer:
-    - SQLite uses '?' placeholders; psycopg uses '%s'
-    - SQLite 'INSERT OR IGNORE' -> Postgres 'INSERT ... ON CONFLICT DO NOTHING'
+    - Converts '?' placeholders to '%s' for Postgres drivers
+    - Converts 'INSERT OR IGNORE' to 'INSERT ... ON CONFLICT DO NOTHING'
     """
 
     def __init__(self, inner, is_postgres: bool):
@@ -153,40 +157,7 @@ class _CompatConn:
         self._is_postgres = is_postgres
 
     def cursor(self):
-        # DB-API connections expose .cursor(). SQLAlchemy Connection does not;
-        # for SQLite we may get an engine.connect() object, so unwrap to DB-API.
-        if hasattr(self._conn, "cursor"):
-            return _CompatCursor(self._conn.cursor(), self._is_postgres)
-
-        # SQLAlchemy Connection: try common unwrapping attributes/methods.
-        raw = None
-        for attr in ("connection", "driver_connection", "dbapi_connection"):
-            try:
-                raw = getattr(self._conn, attr)
-            except Exception:
-                raw = None
-            if raw is not None:
-                break
-        if raw is None and hasattr(self._conn, "get_raw_connection"):
-            try:
-                raw = self._conn.get_raw_connection()
-            except Exception:
-                raw = None
-
-        if raw is None:
-            raise AttributeError("Underlying connection does not provide a DB-API cursor()")
-
-        # SQLAlchemy sometimes wraps the DB-API connection in a proxy that still
-        # provides .cursor(); fall back to common proxy attributes if needed.
-        if not hasattr(raw, "cursor") and hasattr(raw, "connection"):
-            raw = raw.connection
-        if not hasattr(raw, "cursor") and hasattr(raw, "driver_connection"):
-            raw = raw.driver_connection
-
-        if not hasattr(raw, "cursor"):
-            raise AttributeError("Underlying connection does not provide a DB-API cursor()")
-
-        return _CompatCursor(raw.cursor(), self._is_postgres)
+        return _CompatCursor(self._conn.cursor(), self._is_postgres)
 
     def commit(self):
         return self._conn.commit()
@@ -197,40 +168,25 @@ class _CompatConn:
     def close(self):
         return self._conn.close()
 
-    def execute(self, *args, **kwargs):
-        # Support both DB-API and SQLAlchemy 2.x Connection.
-        # SQLAlchemy 2.x does not allow raw SQL strings via Connection.execute().
-        if args and isinstance(args[0], str) and hasattr(self._conn, "exec_driver_sql"):
-            sql = args[0]
-            rest = args[1:]
-            return self._conn.exec_driver_sql(sql, *rest, **kwargs)
-        return self._conn.execute(*args, **kwargs)
-
     def __getattr__(self, name: str):
         return getattr(self._conn, name)
 
 
 try:
-    conn = _CompatConn(_connect_db(), IS_POSTGRES)
+    conn = _CompatConn(_connect_db(), True)
 except Exception as e:
     # Streamlit often redacts psycopg OperationalError details; show safe diagnostics.
-    if IS_POSTGRES:
-        st.error("Database connection failed (Postgres).")
-        st.caption(
-            "Check that `DATABASE_URL` (or `MAXIMIZE_DATABASE_URL`) is set in Streamlit Secrets, "
-            "credentials are valid, the DB is reachable, and your provider allows inbound connections. "
-            "If you’re using Supabase/Neon/Render/etc, SSL is usually required."
-        )
-        st.code(
-            f"{type(e).__name__}: {str(e) or '<no message>'}\n"
-            f"DSN (sanitized): {_sanitize_db_url(DATABASE_URL)}"
-        )
-    else:
-        st.error("Database connection failed (SQLite).")
-        st.code(f"{type(e).__name__}: {str(e) or '<no message>'}")
+    st.error("Database connection failed (Postgres).")
+    st.caption(
+        "Check that `DATABASE_URL` (or `MAXIMIZE_DATABASE_URL`) is set in Streamlit Secrets, "
+        "credentials are valid, the DB is reachable, and your provider allows inbound connections. "
+        "If you’re using Supabase/Neon/Render/etc, SSL is usually required."
+    )
+    st.code(
+        f"{type(e).__name__}: {str(e) or '<no message>'}\n"
+        f"DSN (sanitized): {_sanitize_db_url(DATABASE_URL)}"
+    )
     st.stop()
-if not IS_POSTGRES:
-    conn.execute("PRAGMA foreign_keys = ON;")
 
 CURRENT_ACADEMIC_YEAR = "2025-2026"
 
@@ -241,37 +197,30 @@ def hash_pw(pw):
 
 def _table_has_column(table: str, column: str) -> bool:
     cur = conn.cursor()
-    if IS_POSTGRES:
-        cur.execute(
-            """
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = %s
-              AND column_name = %s
-            """,
-            (table, column),
-        )
-        return cur.fetchone() is not None
-    cur.execute(f"PRAGMA table_info({table})")
-    cols = [r[1] for r in cur.fetchall()]
-    return column in cols
+    cur.execute(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = %s
+          AND column_name = %s
+        """,
+        (table, column),
+    )
+    return cur.fetchone() is not None
 
 
 def _table_exists(table: str) -> bool:
     cur = conn.cursor()
-    if IS_POSTGRES:
-        cur.execute(
-            """
-            SELECT 1
-            FROM information_schema.tables
-            WHERE table_schema = 'public'
-              AND table_name = %s
-            """,
-            (table,),
-        )
-        return cur.fetchone() is not None
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    cur.execute(
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name = %s
+        """,
+        (table,),
+    )
     return cur.fetchone() is not None
 
 
@@ -281,33 +230,27 @@ def _foreign_key_refs(table: str) -> list[tuple[str, str]]:
     """
     cur = conn.cursor()
     out: list[tuple[str, str]] = []
-    if IS_POSTGRES:
-        cur.execute(
-            """
-            SELECT
-              kcu.column_name AS from_column,
-              ccu.table_name  AS ref_table
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_name = kcu.constraint_name
-             AND tc.table_schema = kcu.table_schema
-            JOIN information_schema.constraint_column_usage ccu
-              ON ccu.constraint_name = tc.constraint_name
-             AND ccu.table_schema = tc.table_schema
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_schema = 'public'
-              AND tc.table_name = %s
-            ORDER BY kcu.ordinal_position
-            """,
-            (table,),
-        )
-        for row in cur.fetchall():
-            out.append((str(row[0]), str(row[1])))
-        return out
-    cur.execute(f"PRAGMA foreign_key_list({table})")
+    cur.execute(
+        """
+        SELECT
+          kcu.column_name AS from_column,
+          ccu.table_name  AS ref_table
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+        JOIN information_schema.constraint_column_usage ccu
+          ON ccu.constraint_name = tc.constraint_name
+         AND ccu.table_schema = tc.table_schema
+        WHERE tc.constraint_type = 'FOREIGN KEY'
+          AND tc.table_schema = 'public'
+          AND tc.table_name = %s
+        ORDER BY kcu.ordinal_position
+        """,
+        (table,),
+    )
     for row in cur.fetchall():
-        # row schema: (id, seq, table, from, to, on_update, on_delete, match)
-        out.append((str(row[3]), str(row[2])))
+        out.append((str(row[0]), str(row[1])))
     return out
 
 
