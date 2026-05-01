@@ -165,7 +165,12 @@ class _CompatConn:
         return self._conn.close()
 
     def execute(self, *args, **kwargs):
-        # SQLite convenience; psycopg conn also supports execute in v3
+        # Support both DB-API and SQLAlchemy 2.x Connection.
+        # SQLAlchemy 2.x does not allow raw SQL strings via Connection.execute().
+        if args and isinstance(args[0], str) and hasattr(self._conn, "exec_driver_sql"):
+            sql = args[0]
+            rest = args[1:]
+            return self._conn.exec_driver_sql(sql, *rest, **kwargs)
         return self._conn.execute(*args, **kwargs)
 
     def __getattr__(self, name: str):
