@@ -21,15 +21,54 @@ import os
 import hashlib
 import datetime as dt
 from typing import Optional, Tuple, Any
-from sqlalchemy import create_engine
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 # ---------------- DB ----------------
-DEFAULT_POSTGRES_URL = "postgresql://postgres:ReportingBeyondCl@ss@db.nldjrqoiphuuoxuexttc.supabase.co:5432/postgres"
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MAXIMIZE_DATABASE_URL") or DEFAULT_POSTGRES_URL
+DEFAULT_SQLITE_URL = "sqlite:///maximize.db"
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MAXIMIZE_DATABASE_URL") or DEFAULT_SQLITE_URL
 IS_POSTGRES = DATABASE_URL.lower().startswith(("postgresql://", "postgres://"))
 
 # Create engine only for SQLite; Postgres uses psycopg directly below.
-engine = create_engine(DATABASE_URL) if not IS_POSTGRES else None
+if not IS_POSTGRES:
+    try:
+        from sqlalchemy import create_engine  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "SQLite selected but SQLAlchemy is not installed. Install with: pip install sqlalchemy"
+        ) from e
+    engine = create_engine(DATABASE_URL)
+else:
+    engine = None
+
+
+def _sanitize_db_url(db_url: str) -> str:
+    """
+    Returns a safe-to-display DSN with credentials removed.
+    """
+    try:
+        # normalize scheme for parsing
+        normalized = "postgresql://" + db_url[len("postgres://") :] if db_url.startswith("postgres://") else db_url
+        p = urlparse(normalized)
+        netloc = p.hostname or ""
+        if p.port:
+            netloc = f"{netloc}:{p.port}"
+        return urlunparse((p.scheme, netloc, p.path, "", p.query, ""))
+    except Exception:
+        return "<unparseable DATABASE_URL>"
+
+
+def _ensure_sslmode_require(db_url: str) -> str:
+    """
+    Streamlit Cloud / managed Postgres providers often require SSL.
+    If sslmode isn't specified, default to sslmode=require.
+    """
+    normalized = "postgresql://" + db_url[len("postgres://") :] if db_url.startswith("postgres://") else db_url
+    p = urlparse(normalized)
+    q = dict(parse_qsl(p.query, keep_blank_values=True))
+    if "sslmode" not in {k.lower() for k in q.keys()}:
+        q["sslmode"] = "require"
+        normalized = urlunparse((p.scheme, p.netloc, p.path, "", urlencode(q), ""))
+    return normalized
 
 def _connect_db():
     """
@@ -47,7 +86,8 @@ def _connect_db():
                 "Install with: pip install psycopg[binary]"
             ) from e
         # psycopg defaults to autocommit=False which matches sqlite behavior here
-        return psycopg.connect(DATABASE_URL)
+        conninfo = _ensure_sslmode_require(DATABASE_URL)
+        return psycopg.connect(conninfo)
     # SQLAlchemy engine connection for SQLite
     return engine.connect()
 
@@ -132,7 +172,25 @@ class _CompatConn:
         return getattr(self._conn, name)
 
 
-conn = _CompatConn(_connect_db(), IS_POSTGRES)
+try:
+    conn = _CompatConn(_connect_db(), IS_POSTGRES)
+except Exception as e:
+    # Streamlit often redacts psycopg OperationalError details; show safe diagnostics.
+    if IS_POSTGRES:
+        st.error("Database connection failed (Postgres).")
+        st.caption(
+            "Check that `DATABASE_URL` (or `MAXIMIZE_DATABASE_URL`) is set in Streamlit Secrets, "
+            "credentials are valid, the DB is reachable, and your provider allows inbound connections. "
+            "If you’re using Supabase/Neon/Render/etc, SSL is usually required."
+        )
+        st.code(
+            f"{type(e).__name__}: {str(e) or '<no message>'}\n"
+            f"DSN (sanitized): {_sanitize_db_url(DATABASE_URL)}"
+        )
+    else:
+        st.error("Database connection failed (SQLite).")
+        st.code(f"{type(e).__name__}: {str(e) or '<no message>'}")
+    st.stop()
 if not IS_POSTGRES:
     conn.execute("PRAGMA foreign_keys = ON;")
 
