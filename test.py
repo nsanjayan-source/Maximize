@@ -1,8 +1,18 @@
-import importlib.util
+import psycopg2
 import streamlit as st
 
-psycopg_found = importlib.util.find_spec("psycopg") is not None
-psycopg2_found = importlib.util.find_spec("psycopg2") is not None
+conn = psycopg2.connect(
+    st.secrets["DATABASE_URL"],
+    sslmode="require"
+)
 
-st.write("psycopg found:", psycopg_found)
-st.write("psycopg2 found:", psycopg2_found)
+cur = conn.cursor()
+
+cur.execute("SELECT username, password FROM users;")
+rows = cur.fetchall()
+
+for row in rows:
+    st.write(f"Username: {row[0]}, Password: {row[1]}")
+
+cur.close()
+conn.close()
