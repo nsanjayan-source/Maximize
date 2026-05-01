@@ -6,3 +6,4 @@ scikit-learn
 sqlalchemy
 psycopg[binary]
 psycopg2-binary
+psycopg2
