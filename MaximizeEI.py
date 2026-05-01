@@ -562,6 +562,8 @@ def login():
         cur.execute("SELECT password, role FROM users WHERE username=?", (u,))
         row = cur.fetchone()
 
+        print(row)
+
         if row and row[0] == hash_pw(p):
             st.session_state.user = u
             st.session_state.role = row[1]
